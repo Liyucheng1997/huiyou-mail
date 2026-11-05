@@ -5,7 +5,7 @@ import {
   state, api, visibleMessages, viewTitle, viewSubtitle, select, selectedMessages, findMessage, loadMessages,
   setFlags, toggleSeen, toggleFlag, trash, archive, spam, move, accountColorIndex, accountById, folderOf, syncView,
 } from './state.js';
-import { showMenu, toast, segmented } from './ui.js';
+import { showMenu, toast, segmented, choiceDialog } from './ui.js';
 import { openCompose } from './compose.js';
 
 let root, scroller, header;
@@ -239,10 +239,30 @@ export function messageMenu(msgs) {
       submenu: folders.map((f) => ({ label: f.name, icon: 'folder', onClick: () => move(msgs, f.path) })),
     },
     { label: '标为垃圾邮件', icon: 'spam', onClick: () => spam(msgs) },
+    { label: one ? `拉黑 ${one.from.address || '发件人'}` : '拉黑这些发件人', icon: 'shield', onClick: () => blockSenders(msgs) },
     { label: '删除', icon: 'trash', shortcut: 'Del', danger: true, onClick: () => trash(msgs) }
   );
   if (!sameAccount) items.find((i) => i.label === '移动到').disabled = true;
   return items;
+}
+
+// 拉黑发件人：以后他们的新邮件自动进“已删除”；可选把现有的也删掉
+async function blockSenders(msgs) {
+  const senders = [...new Set(msgs.map((m) => (m.from.address || '').toLowerCase()).filter(Boolean))];
+  if (!senders.length) return;
+  const choice = await choiceDialog({
+    title: `拉黑 ${senders.length === 1 ? senders[0] : senders.length + ' 个发件人'}？`,
+    message: '以后他们发来的新邮件会自动移到“已删除”。可以在“设置 → AI 助手”里解除。',
+    buttons: [
+      { label: '拉黑，并删除这些邮件', value: 'both', danger: true },
+      { label: '只拉黑', value: 'block' },
+      { label: '取消', value: null },
+    ],
+  });
+  if (!choice) return;
+  await api.blocklist.add({ senders, reason: '手动拉黑' });
+  if (choice === 'both') await trash(msgs);
+  toast(`已拉黑 ${senders.length} 个发件人`, 'success');
 }
 
 export function focusList() {

@@ -11,6 +11,7 @@ const SECTIONS = [
   { id: 'general', label: '通用', icon: 'sliders' },
   { id: 'accounts', label: '邮箱账户', icon: 'user' },
   { id: 'signin', label: '登录方式', icon: 'shield' },
+  { id: 'ai', label: 'AI 助手', icon: 'sparkle' },
   { id: 'storage', label: '存储', icon: 'database' },
   { id: 'about', label: '关于与更新', icon: 'info' },
 ];
@@ -32,7 +33,7 @@ export function openSettings(section = 'general') {
     content.querySelectorAll('.settings-nav .nav-item').forEach((b) => b.classList.toggle('active', b.dataset.s === id));
     main.innerHTML = '';
     main.scrollTop = 0;
-    ({ general, accounts, signin, storage, about })[id](main, () => show(id));
+    ({ general, accounts, signin, ai, storage, about })[id](main, () => show(id));
   };
   content.querySelectorAll('.settings-nav .nav-item').forEach((b) => (b.onclick = () => show(b.dataset.s)));
   show(section);
@@ -189,6 +190,41 @@ async function signin(main) {
     main.appendChild(card);
   }
   main.appendChild(h('<div class="set-desc muted">客户端 ID 只保存在本机。登录时的账号密码在浏览器里输入，不经过汇邮；汇邮只保存加密后的授权令牌。</div>'));
+}
+
+async function ai(main, refresh) {
+  main.appendChild(pageHead('AI', 'AI 助手', '由你电脑上的 Claude Code 驱动，使用你自己的 Claude 订阅额度，模型 Claude Opus 5.5。邮件内容只发给 Claude，用来回答你的问题。'));
+  const st = await api.ai.status();
+  const card = h('<div class="set-card"></div>');
+  const state1 = h(`<span class="oauth-badge"><span class="state-dot ${st.ready ? 'success' : 'warning'}"></span>${st.ready ? '已连接' : '没有找到'}</span>`);
+  card.appendChild(row('Claude Code', st.ready ? st.path : '请先安装 Claude Code，并在终端运行 claude 登录', state1));
+  const pathInput = h(`<input class="input" style="width:260px" placeholder="自动检测" spellcheck="false">`);
+  pathInput.value = state.settings.claudePath || '';
+  pathInput.onchange = async () => {
+    await save({ claudePath: pathInput.value.trim() });
+    refresh();
+  };
+  card.appendChild(row('claude.exe 位置', '自动检测不到时，填 claude.exe 的完整路径', pathInput));
+  card.appendChild(
+    row('思考深度', '越深越准，也更慢、更耗订阅额度；改了以后从下一次新对话开始生效', segmented([{ label: '快', value: 'low' }, { label: '标准', value: 'medium' }, { label: '深入', value: 'high' }], state.settings.aiEffort || 'medium', (v) => save({ aiEffort: v })))
+  );
+  main.appendChild(card);
+
+  main.appendChild(h('<div class="set-section-title">黑名单</div>'));
+  const list = await api.blocklist.list();
+  const card2 = h('<div class="set-card"></div>');
+  if (!list.length) card2.appendChild(h('<div class="set-empty muted">还没有拉黑任何发件人。可以在邮件上右键“拉黑”，或者让 AI 助手帮你清理。</div>'));
+  for (const b of list) {
+    const el = h(`<div class="block-row"><div class="block-text"><div class="set-label">${escapeHtml(b.pattern)}</div><div class="set-desc">${escapeHtml(b.pattern.startsWith('@') ? '整个域名' : '这个地址')}${b.reason ? ' · ' + escapeHtml(b.reason) : ''}</div></div><button class="btn btn-sm">解除</button></div>`);
+    el.querySelector('button').onclick = async () => {
+      await api.blocklist.remove([b.pattern]);
+      toast('已解除', 'success', 1500);
+      refresh();
+    };
+    card2.appendChild(el);
+  }
+  main.appendChild(card2);
+  main.appendChild(h('<div class="set-desc muted">被拉黑的发件人发来的新邮件，收信时会自动移到“已删除”。</div>'));
 }
 
 async function storage(main, refresh) {

@@ -8,6 +8,7 @@ const store = require('./store');
 const mail = require('./mail-service');
 const providers = require('./providers');
 const oauth = require('./oauth');
+const ai = require('./ai-service');
 const updater = require('./update-service');
 
 const isDev = process.argv.includes('--dev');
@@ -15,7 +16,9 @@ const APP_NAME = '汇邮';
 app.setName('Huiyou Mail');
 // 开发 / 测试用：把数据放到单独目录，不碰正在使用的那份
 if (process.env.HUIYOU_USER_DATA) app.setPath('userData', process.env.HUIYOU_USER_DATA);
-app.setAppUserModelId('io.github.liyucheng1997.huiyou-mail');
+// 任务栏按这个 ID 归组并缓存图标。开发时跑的是 electron.exe（Electron 图标），
+// 用不同的 ID，免得 Windows 把安装版的任务栏图标记成 Electron 的
+app.setAppUserModelId(app.isPackaged ? 'io.github.liyucheng1997.huiyou-mail' : 'io.github.liyucheng1997.huiyou-mail.dev');
 
 let win = null;
 let tray = null;
@@ -28,7 +31,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => showWindow());
 }
 
-const iconPath = () => path.join(__dirname, '..', '..', 'build', 'icon.png');
+// 窗口 / 任务栏用多尺寸 ICO（Windows 下更清晰），托盘和通知用 PNG
+const iconPath = (ext = 'png') => path.join(__dirname, '..', '..', 'build', `icon.${ext}`);
 
 function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -55,7 +59,7 @@ function createWindow() {
     minHeight: 520,
     show: false,
     title: APP_NAME,
-    icon: iconPath(),
+    icon: iconPath(process.platform === 'win32' ? 'ico' : 'png'),
     backgroundColor: isDark() ? '#000000' : '#f5f5f7',
     titleBarStyle: 'hidden',
     titleBarOverlay: titleColors(isDark()),
@@ -219,6 +223,7 @@ function registerIpc() {
   handle('settings:set', (patch) => {
     const next = store.settings.set(patch);
     if ('syncInterval' in patch) scheduleSync();
+    if ('aiEffort' in patch || 'claudePath' in patch) ai.reset();
     if ('openAtLogin' in patch) app.setLoginItemSettings({ openAtLogin: !!patch.openAtLogin, args: ['--hidden'] });
     return next;
   });
@@ -279,6 +284,16 @@ function registerIpc() {
     firstRun.delete(id);
   });
   handle('accounts:reorder', (ids) => store.accounts.reorder(ids));
+
+  handle('ai:status', () => ai.status());
+  handle('ai:send', (payload) => ai.send(payload));
+  handle('ai:interrupt', () => ai.interrupt());
+  handle('ai:reset', () => ai.reset());
+  handle('ai:approve', ({ requestId, ok }) => ai.answerApproval(requestId, ok));
+  handle('ai:resolve', (id) => ai.resolve(id));
+  handle('blocklist:list', () => store.blocklist.list());
+  handle('blocklist:add', ({ senders, reason }) => store.blocklist.add(senders, reason));
+  handle('blocklist:remove', (senders) => store.blocklist.remove(senders));
 
   handle('oauth:status', () => oauth.status());
   handle('oauth:start', async ({ provider, loginHint }) => {
@@ -360,6 +375,7 @@ app.whenReady().then(() => {
       if (channel === 'mail:changed') notify(payload);
     },
   });
+  ai.init((channel, payload) => send(channel, payload));
   registerIpc();
   createWindow();
   createTray();
@@ -384,5 +400,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  ai.reset();
   mail.disconnectAll();
 });

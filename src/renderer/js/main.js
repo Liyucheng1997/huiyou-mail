@@ -14,6 +14,7 @@ import { openAccountDialog } from './account-dialog.js';
 import { initTheme, toggleTheme, isDark } from './theme.js';
 import { initUpdate, restartToUpdate, openDownload, updateStatus } from './update.js';
 import { toast, topOverlay } from './ui.js';
+import { initAi, toggleAi, isAiOpen } from './ai-panel.js';
 
 async function boot() {
   state.settings = await api.settings.get();
@@ -28,6 +29,7 @@ async function boot() {
   initSidebar();
   initList();
   initReader();
+  initAi();
   initStatusbar();
   await refreshUnread();
   await loadMessages();
@@ -48,12 +50,16 @@ function buildTitlebar() {
       <button class="search-clear hidden" title="清除">${icon('close', 12)}</button>
     </div>
     <div class="tb-actions">
+      <button class="btn ai-btn" title="AI 助手 (Ctrl+J)">${icon('sparkle', 15)}AI 助手</button>
       <button class="btn btn-primary compose-btn">${icon('pen', 15)}写邮件</button>
       <button class="tb-round" data-a="sync" title="立即收信 (F5)">${icon('refresh', 17)}</button>
       <button class="tb-round" data-a="theme" title="切换深色 / 浅色">${icon(isDark() ? 'sun' : 'moon', 17)}</button>
       <button class="tb-round" data-a="settings" title="设置">${icon('gear', 17)}</button>
     </div>`;
   tb.querySelector('.compose-btn').onclick = () => openCompose({ mode: 'new' });
+  const aiBtn = tb.querySelector('.ai-btn');
+  aiBtn.onclick = () => toggleAi();
+  bus.on('ai-toggle', (on) => aiBtn.classList.toggle('active', on));
   tb.querySelector('[data-a=sync]').onclick = manualSync;
   tb.querySelector('[data-a=theme]').onclick = toggleTheme;
   tb.querySelector('[data-a=settings]').onclick = () => openSettings();
@@ -224,6 +230,10 @@ function onKey(e) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
     e.preventDefault();
     return openCompose({ mode: 'new' });
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') {
+    e.preventDefault();
+    return toggleAi();
   }
   if ((e.ctrlKey || e.metaKey) && e.key === ',') {
     e.preventDefault();

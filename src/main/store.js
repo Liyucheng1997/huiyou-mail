@@ -33,7 +33,9 @@ const DEFAULT_SETTINGS = {
   autoUpdate: true,
   density: 'comfortable', // comfortable | compact
   markReadOnOpen: true,
-  oauthClients: {}, // { google: { clientId, clientSecret }, microsoft: { clientId } }
+  oauthClients: {},
+  aiEffort: 'medium', // low | medium | high
+  claudePath: '', // 留空自动检测 // { google: { clientId, clientSecret }, microsoft: { clientId } }
 };
 
 let settingsCache = null;
@@ -122,6 +124,57 @@ const accounts = {
   },
 };
 
+// ---------- 黑名单：完整地址（a@b.com）或整个域名（@b.com，含子域名） ----------
+function normPattern(x) {
+  let v = String(x || '').trim().toLowerCase().replace(/^mailto:/, '');
+  const m = v.match(/<([^>]+)>/);
+  if (m) v = m[1];
+  if (!v) return '';
+  if (!v.includes('@')) v = '@' + v; // 只给了域名
+  return /^[^\s@]*@[^\s@]+\.[^\s@]+$/.test(v) ? v : '';
+}
+const blocklist = {
+  list() {
+    return readJson('blocklist.json', []);
+  },
+  add(patterns, reason = '') {
+    const list = blocklist.list();
+    const have = new Set(list.map((b) => b.pattern));
+    const added = [];
+    for (const x of patterns) {
+      const pattern = normPattern(x);
+      if (!pattern || have.has(pattern)) continue;
+      have.add(pattern);
+      list.push({ pattern, reason: String(reason || '').slice(0, 200), addedAt: Date.now() });
+      added.push(pattern);
+    }
+    writeJson('blocklist.json', list);
+    return added;
+  },
+  remove(patterns) {
+    const drop = new Set(patterns.map(normPattern));
+    const list = blocklist.list().filter((b) => !drop.has(b.pattern));
+    writeJson('blocklist.json', list);
+    return list;
+  },
+  matcher() {
+    const list = blocklist.list();
+    if (!list.length) return () => null;
+    return (address) => {
+      const a = String(address || '').toLowerCase();
+      if (!a) return null;
+      const domain = a.split('@')[1] || '';
+      return (
+        list.find((b) => {
+          if (!b.pattern.startsWith('@')) return b.pattern === a;
+          const d = b.pattern.slice(1);
+          return domain === d || domain.endsWith('.' + d);
+        }) || null
+      );
+    };
+  },
+};
+
 // ---------- 界面状态（窗口大小、上次选中的文件夹等） ----------
 const state = {
   get() {
@@ -134,4 +187,4 @@ const state = {
   },
 };
 
-module.exports = { settings, accounts, state, readJson, writeJson, dataDir: dir };
+module.exports = { settings, accounts, blocklist, state, readJson, writeJson, dataDir: dir };

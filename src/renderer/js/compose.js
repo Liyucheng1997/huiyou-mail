@@ -165,6 +165,20 @@ const ownAddresses = () => new Set(state.accounts.map((a) => a.email.toLowerCase
 const prefix = (p, s) => (new RegExp('^' + p + '\\s*[:：]', 'i').test(s || '') ? s : `${p}: ${s || ''}`);
 
 // 根据模式准备初始内容
+// AI 助手起草的内容：收件人 / 主题 / 正文（纯文本）填进写信窗口，签名和引用保留
+function applyPrefill(init, pf) {
+  if (pf.to && pf.to.length) init.to = pf.to.map(parseAddr).filter(Boolean);
+  if (pf.cc && pf.cc.length) init.cc = pf.cc.map(parseAddr).filter(Boolean);
+  if (pf.subject) init.subject = pf.subject;
+  if (pf.body) {
+    const html = String(pf.body)
+      .split(/\r?\n/)
+      .map((line) => (line.trim() ? `<div>${escapeHtml(line)}</div>` : '<div><br></div>'))
+      .join('');
+    init.body = html + init.body;
+  }
+}
+
 async function prepare(opts) {
   const { mode, source } = opts;
   let accountId = opts.accountId || (source && source.accountId) || (state.view.accountId && accountById(state.view.accountId) ? state.view.accountId : state.accounts[0]?.id);
@@ -242,6 +256,7 @@ export async function openCompose(opts = { mode: 'new' }) {
   } catch (err) {
     return toast('无法载入原邮件：' + err.message, 'error', 4000);
   }
+  if (opts.prefill) applyPrefill(init, opts.prefill);
 
   const files = []; // 新加的本地附件
   let carry = init.carry ? init.carry.list.map((a) => ({ ...a, keep: true })) : [];

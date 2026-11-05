@@ -12,6 +12,8 @@
 - **搜索**：输入即在本地过滤，回车在服务器上搜索（Gmail 支持 Gmail 搜索语法）
 - **后台收信**：服务器推送（IDLE）+ 定时检查；新邮件系统通知，任务栏图标显示未读数，关闭窗口后留在托盘
 - **离线可读**：邮件列表和打开过的邮件缓存在本机
+- **AI 助手**（Ctrl+J）：读邮件、总结未读、找出需要回复的邮件、清理广告、拉黑发件人、起草回复。由你电脑上的 Claude Code 驱动，用你自己的 Claude 订阅，模型 Claude Opus 5.5
+- **黑名单**：右键邮件“拉黑”，或让 AI 帮你拉黑；之后这些发件人的新邮件自动进“已删除”
 - **Gmail / Outlook 账号登录（OAuth）**：在浏览器里登录授权，不用应用专用密码；Outlook / Hotmail 个人账户只能这样登录
 - 浅色 / 深色 / 跟随系统；密码和授权令牌用 Windows 系统加密（safeStorage）保存在本机，不上传任何地方
 
@@ -61,6 +63,23 @@
 | Yahoo | 应用密码 | 账户安全 → 生成应用密码 |
 | 企业邮 / 自建邮箱 | 密码或客户端专用密码 | 选“其他邮箱”，在“服务器设置”里填写 IMAP / SMTP 地址 |
 
+## AI 助手
+
+点顶栏的“AI 助手”或按 `Ctrl+J` 打开，可以直接说：
+
+- “总结一下今天的未读邮件”
+- “找出广告和推广邮件，帮我清理掉”
+- “最近有哪些邮件需要我回复？”
+- “帮我回复张伟那封邮件，说我能参加”
+
+**前提**：电脑上装了 [Claude Code](https://claude.com/claude-code)，并在终端运行过 `claude` 登录。汇邮会自动找到它（默认 `%USERPROFILE%\.local\bin\claude.exe`），找不到时可在“设置 → AI 助手”里指定路径。用量计入你的 Claude 订阅。
+
+**安全**：
+- 删除、归档、移动、标垃圾、拉黑之前，面板里会弹出确认卡片，列出涉及的邮件，你点确认才执行
+- AI 只能起草邮件，由你检查后自己点发送
+- AI 只有邮件相关的工具，不能读写电脑上的文件或运行命令；不会读取你 Claude Code 的 CLAUDE.md、插件和 MCP 配置
+- 邮件内容被当作不可信数据：邮件里写给 AI 的“指令”不会被执行
+
 ## 快捷键
 
 | 按键 | 作用 | 按键 | 作用 |
@@ -70,6 +89,7 @@
 | `Delete` | 删除 | `U` | 标为已读 / 未读 |
 | `S` | 星标 | `/` | 搜索 |
 | `F5` | 立即收信 | `Ctrl+Enter` | 发送 |
+| `Ctrl+J` | 打开 / 关闭 AI 助手 | | |
 
 ## 开发
 
@@ -81,7 +101,7 @@ npm run dist       # 打包安装版 + 便携版到 dist/
 
 想让打包出来的版本自带 OAuth 客户端（用户不用自己创建），把客户端 ID 填进 `src/main/oauth-clients.js`。开发时也可以用环境变量 `HUIYOU_GOOGLE_CLIENT_ID`、`HUIYOU_GOOGLE_CLIENT_SECRET`、`HUIYOU_MICROSOFT_CLIENT_ID`。
 
-技术栈：Electron、[imapflow](https://github.com/postalsys/imapflow)（IMAP）、[nodemailer](https://nodemailer.com/)（SMTP）、[mailparser](https://github.com/nodemailer/mailparser)（解析邮件）。界面是原生 HTML/CSS/JS，没有前端框架。
+技术栈：Electron、[Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)（AI 助手）、[imapflow](https://github.com/postalsys/imapflow)（IMAP）、[nodemailer](https://nodemailer.com/)（SMTP）、[mailparser](https://github.com/nodemailer/mailparser)（解析邮件）。界面是原生 HTML/CSS/JS，没有前端框架。
 
 ### 发布新版本
 

@@ -13,7 +13,8 @@ const svg = (size) => `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" h
 </svg>`;
 
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ show: false, width: 600, height: 600, webPreferences: { offscreen: true } });
+  // 透明窗口 + 透明背景，圆角外面才是透明的（否则截图会带白底）
+  const win = new BrowserWindow({ show: false, width: 600, height: 600, frame: false, transparent: true, backgroundColor: '#00000000', webPreferences: { offscreen: true } });
   const out = path.join(__dirname, '..', 'build');
   fs.mkdirSync(out, { recursive: true });
   const sizes = [16, 24, 32, 48, 64, 128, 256, 512];

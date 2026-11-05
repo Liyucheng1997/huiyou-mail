@@ -308,6 +308,17 @@ function scheduleSync(accountId, p) {
   );
 }
 
+// 收件箱里新收到的、来自黑名单发件人的邮件：直接移到“已删除”，也不弹通知
+async function applyBlocklist(accountId, p, result) {
+  if (p !== inboxPath(accountId) || !result.fetched || !result.fetched.length) return;
+  const match = store.blocklist.matcher();
+  const hit = result.fetched.filter((m) => match(m.from && m.from.address));
+  if (!hit.length) return;
+  const uids = new Set(hit.map((m) => m.uid));
+  result.newMessages = result.newMessages.filter((m) => !uids.has(m.uid));
+  await deleteMessages(accountId, p, [...uids]).catch(() => {});
+}
+
 // 把错误告诉界面（侧栏红字 / 状态栏），返回给用户看的说明
 function reportError(accountId, err, p = null) {
   const acc = store.accounts.get(accountId);
@@ -324,6 +335,8 @@ function syncFolder(accountId, p) {
     status(accountId, { state: 'syncing', path: p });
     try {
       const result = await withMailbox(accountId, p, (client) => doSync(client, accountId, p));
+      await applyBlocklist(accountId, p, result);
+      delete result.fetched;
       status(accountId, { state: 'idle', path: p, lastSync: Date.now() });
       emit('mail:changed', { accountId, path: p, newMessages: result.newMessages });
       return result;
@@ -381,7 +394,7 @@ async function doSync(client, accountId, p) {
   updateFolderCounts(accountId, p, data);
 
   const newMessages = firstSync || !known.length ? [] : fresh.filter((m) => !m.seen);
-  return { ...publicFolder(data), newMessages };
+  return { ...publicFolder(data), newMessages, fetched: fresh };
 }
 
 function updateFolderCounts(accountId, p, data) {
@@ -784,6 +797,8 @@ function clearBodyCache() {
 module.exports = {
   init: (opts) => (emit = opts.emit),
   statusAll: () => lastStatus,
+  loadFolder,
+  folderBySpecial,
   reportError,
   listFolders,
   loadFolders,

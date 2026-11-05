@@ -44,6 +44,17 @@ contextBridge.exposeInMainWorld('api', {
     reorder: call('accounts:reorder'),
   },
   oauth: { status: call('oauth:status'), start: call('oauth:start'), cancel: call('oauth:cancel') },
+  ai: {
+    status: call('ai:status'),
+    send: call('ai:send'),
+    interrupt: call('ai:interrupt'),
+    reset: call('ai:reset'),
+    approve: call('ai:approve'),
+    resolve: call('ai:resolve'),
+    onEvent: on('ai:event'),
+    onDraft: on('ai:draft'),
+  },
+  blocklist: { list: call('blocklist:list'), add: call('blocklist:add'), remove: call('blocklist:remove'), onChange: on('ai:blocklist') },
   mail: {
     syncAll: call('mail:sync-all'),
     statusAll: call('mail:status-all'),
