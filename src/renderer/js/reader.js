@@ -66,12 +66,69 @@ async function render() {
   body.appendChild(translator.bar);
   body.appendChild(translator.view);
   body.appendChild(original);
+  loadThread(summary, body, seq);
 
   if (!summary.seen && state.settings.markReadOnOpen !== false) {
     readTimer = setTimeout(() => {
       if (state.current && parseKey(state.current).uid === summary.uid) setFlags([summary], { seen: true });
     }, 600);
   }
+}
+
+// 会话：同一个对话里的其他邮件（包括自己的回复），按时间排在正文下面
+async function loadThread(summary, body, seq) {
+  let list;
+  try {
+    list = await api.mail.thread({ accountId: summary.accountId, path: summary.path, uid: summary.uid });
+  } catch {
+    return;
+  }
+  if (seq !== loadSeq || !list || list.length < 2) return;
+  const mine = list.filter((m) => m.self && !m.current).length;
+  const hint = h(`<button class="thread-hint">${icon('mails', 14)}<span>这个对话共 ${list.length} 封邮件${mine ? `，其中 ${mine} 封是你的回复` : ''}</span>${icon('chevronDown', 13)}</button>`);
+  const sec = h(`<div class="thread"><div class="thread-title">${icon('mails', 15)}<span>对话 · ${list.length} 封</span></div></div>`);
+  hint.onclick = () => sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const head = body.querySelector('.reader-head');
+  if (head) head.after(hint);
+  for (const m of list) sec.appendChild(threadItem(m));
+  body.appendChild(sec);
+}
+
+const names = (list) => (list || []).map((a) => a.name || a.address).join('、');
+
+function threadItem(m) {
+  const el = h(`<div class="titem ${m.current ? 'current' : ''}">
+    <div class="titem-head">
+      <span class="avatar ${m.self ? 'self' : ''}">${escapeHtml(m.self ? '我' : initials(m.from))}</span>
+      <div class="titem-text">
+        <div class="titem-line"><span class="titem-name">${escapeHtml(m.self ? '我' : displayName(m.from) || '(未知发件人)')}</span>${
+          m.current ? '<span class="titem-tag">正在查看</span>' : ''
+        }<span class="titem-date tabular">${escapeHtml(longDate(m.date))}</span></div>
+        <div class="titem-snippet">${escapeHtml(m.self ? `发给 ${names(m.to)}${m.snippet ? '：' + m.snippet : ''}` : m.snippet || m.subject || '')}</div>
+      </div>
+    </div>
+    <div class="titem-body hidden"></div>
+  </div>`);
+  if (m.current) return el;
+  const bodyEl = el.querySelector('.titem-body');
+  let loaded = false;
+  el.querySelector('.titem-head').onclick = async () => {
+    const open = !bodyEl.classList.toggle('hidden');
+    el.classList.toggle('open', open);
+    if (!open || loaded) return;
+    loaded = true;
+    bodyEl.innerHTML = '<div class="reader-loading"><div class="spinner"></div></div>';
+    try {
+      const msg = await api.mail.read({ accountId: m.accountId, path: m.path, uid: m.uid });
+      bodyEl.innerHTML = '';
+      bodyEl.appendChild(h(`<div class="titem-meta">发给 ${escapeHtml(names(msg.to) || '(无)')}${msg.cc.length ? `　抄送 ${escapeHtml(names(msg.cc))}` : ''}</div>`));
+      bodyEl.appendChild(contentEl(msg));
+    } catch (err) {
+      loaded = false;
+      bodyEl.innerHTML = `<div class="titem-meta">${escapeHtml(err.message)}</div>`;
+    }
+  };
+  return el;
 }
 
 function renderMulti() {
@@ -243,10 +300,12 @@ function contentEl(msg) {
       }
     });
     const fit = () => {
-      frame.style.height = Math.max(120, doc.documentElement.scrollHeight) + 'px';
+      // 量正文本身的高度（量 html 会拿到 iframe 自己的高度，只增不减）
+      const b = doc.body;
+      frame.style.height = Math.max(60, b ? Math.ceil(b.scrollHeight + b.getBoundingClientRect().top) + 4 : 120) + 'px';
     };
     fit();
-    new ResizeObserver(fit).observe(doc.documentElement);
+    new ResizeObserver(fit).observe(doc.body || doc.documentElement);
     doc.querySelectorAll('img').forEach((img) => img.addEventListener('load', fit));
   };
   wrap.appendChild(frame);
@@ -265,6 +324,7 @@ function buildDoc(msg, allowRemote) {
 <base target="_blank">
 <style>
   html,body{margin:0;padding:0;background:#fff;color:#1d1d1f;}
+  html{overflow-y:hidden;}
   body{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;font-size:14px;line-height:1.65;padding:4px 2px 24px;word-wrap:break-word;overflow-wrap:anywhere;}
   img{max-width:100%;height:auto;}
   table{max-width:100%;}

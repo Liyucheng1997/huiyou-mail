@@ -471,3 +471,27 @@
 .translation a { color: var(--primary); }
 .translation .tr-note { margin-top: 14px; font-size: 12px; }
 .translation .tr-wait { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 13px; }
+
+/* ---------- 会话 ---------- */
+.thread-hint { display: inline-flex; align-items: center; gap: 6px; margin: -4px 0 14px; padding: 5px 12px; border: 0; border-radius: 99px; background: var(--primary-soft); color: var(--primary); font-size: 12.5px; font-weight: 500; transition: transform 0.15s; }
+.thread-hint:active { transform: scale(0.97); }
+.thread { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.thread-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-2); margin-bottom: 4px; }
+.thread-title .ico { color: var(--primary); }
+.titem { border-radius: 14px; background: var(--panel-2); overflow: hidden; }
+.titem-head { display: flex; align-items: center; gap: 12px; padding: 10px 14px; cursor: pointer; transition: background 0.12s; }
+.titem:not(.current) .titem-head:hover { background: var(--fill); }
+.titem.current { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.titem.current .titem-head { cursor: default; }
+.titem .avatar { width: 32px; height: 32px; font-size: 13px; }
+.avatar.self { background: var(--primary-soft); color: var(--primary); }
+.titem-text { flex: 1; min-width: 0; }
+.titem-line { display: flex; align-items: baseline; gap: 8px; }
+.titem-name { font-size: 13.5px; font-weight: 600; }
+.titem-tag { font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--fill); color: var(--text-2); }
+.titem-date { margin-left: auto; font-size: 12px; color: var(--text-3); flex: none; }
+.titem-snippet { margin-top: 2px; font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.titem.open .titem-snippet { display: none; }
+.titem-body { padding: 0 14px 12px 58px; }
+.titem-meta { font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
+.titem-body .reader-content { background: var(--panel); padding: 8px 12px; }

@@ -319,6 +319,91 @@ async function applyBlocklist(accountId, p, result) {
   await deleteMessages(accountId, p, [...uids]).catch(() => {});
 }
 
+// ---------- 会话（同一个对话的往来邮件，包括自己的回复） ----------
+// 连接停在哪个文件夹，服务器就只推送那个文件夹的新邮件（IDLE）。看完别的文件夹后切回收件箱。
+const idleTimers = new Map();
+function idleInbox(accountId) {
+  clearTimeout(idleTimers.get(accountId));
+  idleTimers.set(
+    accountId,
+    setTimeout(() => {
+      idleTimers.delete(accountId);
+      withMailbox(accountId, inboxPath(accountId), async () => {}).catch(() => {});
+    }, 1500)
+  );
+}
+
+const THREAD_SKIP = ['\\Trash', '\\Junk', '\\Drafts'];
+const threadKey = (m) => m.messageId || `${m.path}\n${m.uid}`;
+
+// 本机缓存里找：Gmail 用对话编号，其他邮箱顺着 Message-ID / In-Reply-To 串起来
+function localThread(accountId, cur) {
+  const pool = [];
+  for (const f of loadFolders(accountId)) {
+    if (THREAD_SKIP.includes(f.specialUse)) continue;
+    if (!memo.has(accountId + '\n' + f.path) && !fs.existsSync(folderFile(accountId, f.path))) continue;
+    pool.push(...loadFolder(accountId, f.path).messages);
+  }
+  if (cur.threadId) return pool.filter((m) => m.threadId === cur.threadId);
+  const ids = new Set([cur.messageId, cur.inReplyTo].filter(Boolean));
+  const out = new Map([[threadKey(cur), cur]]);
+  if (!ids.size) return [cur];
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const m of pool) {
+      if (out.has(threadKey(m))) continue;
+      if ((m.messageId && ids.has(m.messageId)) || (m.inReplyTo && ids.has(m.inReplyTo))) {
+        out.set(threadKey(m), m);
+        if (m.messageId) ids.add(m.messageId);
+        if (m.inReplyTo) ids.add(m.inReplyTo);
+        grew = true;
+      }
+    }
+  }
+  return [...out.values()];
+}
+
+async function thread(accountId, p, uid) {
+  const cur = loadFolder(accountId, p).messages.find((m) => m.uid === uid);
+  if (!cur) return [];
+  // 已发送还没同步过：先拉一次，这样能看到自己的回复
+  const sent = folderBySpecial(accountId, '\\Sent');
+  if (sent && sent.path !== p && !memo.has(accountId + '\n' + sent.path) && !fs.existsSync(folderFile(accountId, sent.path))) {
+    await syncFolder(accountId, sent.path).catch(() => {});
+    idleInbox(accountId);
+  }
+  let list = [];
+  // Gmail：在“所有邮件”里按对话编号搜，能找到没缓存的更早往来
+  const all = folderBySpecial(accountId, '\\All');
+  if (cur.threadId && all) {
+    try {
+      list = await withMailbox(accountId, all.path, async (client) => {
+        const uids = ((await client.search({ threadId: cur.threadId }, { uid: true })) || []).sort((a, b) => a - b).slice(-50);
+        return uids.length ? fetchSummaries(client, accountId, all.path, uids.join(','), { uid: true }) : [];
+      });
+      idleInbox(accountId);
+    } catch {
+      list = [];
+    }
+  }
+  if (list.length < 2) list = localThread(accountId, cur);
+  // 同一封邮件可能同时在收件箱和“所有邮件”里：按 Message-ID 去重，优先用当前文件夹那份
+  const seen = new Map();
+  for (const m of list) {
+    const k = threadKey(m);
+    const prev = seen.get(k);
+    if (!prev || (m.path === p && m.uid === uid)) seen.set(k, m);
+  }
+  const own = new Set(store.accounts.list().map((a) => a.email.toLowerCase()));
+  return [...seen.values()]
+    .sort((a, b) => a.date - b.date)
+    .map((m) => ({
+      ...m,
+      self: own.has(String((m.from && m.from.address) || '').toLowerCase()),
+      current: (m.path === p && m.uid === uid) || (!!cur.messageId && m.messageId === cur.messageId),
+    }));
+}
+
 // 把错误告诉界面（侧栏红字 / 状态栏），返回给用户看的说明
 function reportError(accountId, err, p = null) {
   const acc = store.accounts.get(accountId);
@@ -337,6 +422,7 @@ function syncFolder(accountId, p) {
       const result = await withMailbox(accountId, p, (client) => doSync(client, accountId, p));
       await applyBlocklist(accountId, p, result);
       delete result.fetched;
+      if (p !== inboxPath(accountId)) idleInbox(accountId);
       status(accountId, { state: 'idle', path: p, lastSync: Date.now() });
       emit('mail:changed', { accountId, path: p, newMessages: result.newMessages });
       return result;
@@ -797,6 +883,7 @@ function clearBodyCache() {
 module.exports = {
   init: (opts) => (emit = opts.emit),
   statusAll: () => lastStatus,
+  thread,
   loadFolder,
   folderBySpecial,
   reportError,

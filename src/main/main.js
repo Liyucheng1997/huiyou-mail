@@ -156,6 +156,9 @@ async function syncAccount(id) {
       firstRun.add(id);
       send('mail:folders', { accountId: id });
     }
+    // 已发送也在后台收，会话里才能看到自己的回复；收件箱放最后，连接就停在收件箱等推送
+    const sent = mail.folderBySpecial(id, '\\Sent');
+    if (sent) await mail.syncFolder(id, sent.path).catch(() => {});
     await mail.syncFolder(id, mail.inboxPath(id));
   } catch {
     // 错误已经通过 mail:status 告诉界面
@@ -329,6 +332,7 @@ function registerIpc() {
   handle('mail:messages', (view) => mail.getMessages(view));
   handle('mail:unread', () => mail.unreadSummary());
   handle('mail:read', ({ accountId, path: p, uid }) => mail.readMessage(accountId, p, uid));
+  handle('mail:thread', ({ accountId, path: p, uid }) => mail.thread(accountId, p, uid));
   handle('mail:flags', ({ accountId, path: p, uids, patch }) => mail.setFlags(accountId, p, uids, patch));
   handle('mail:move', ({ accountId, path: p, uids, dest }) => mail.moveMessages(accountId, p, uids, dest));
   handle('mail:delete', ({ accountId, path: p, uids, permanent }) => mail.deleteMessages(accountId, p, uids, { permanent }));

@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld('api', {
     messages: call('mail:messages'),
     unread: call('mail:unread'),
     read: call('mail:read'),
+    thread: call('mail:thread'),
     flags: call('mail:flags'),
     move: call('mail:move'),
     remove: call('mail:delete'),
