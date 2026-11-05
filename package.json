@@ -1,0 +1,103 @@
+{
+  "name": "huiyou-mail",
+  "version": "1.0.0",
+  "description": "汇邮 - 把 Gmail、QQ、163、iCloud 等多个邮箱汇到一处的桌面邮件客户端",
+  "author": "Yucheng LI",
+  "license": "MIT",
+  "homepage": "https://github.com/Liyucheng1997/huiyou-mail",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Liyucheng1997/huiyou-mail.git"
+  },
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "dist": "electron-builder --win --x64",
+    "pack": "electron-builder --win --x64 --dir"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11",
+    "iconv-lite": "^0.7.3",
+    "imapflow": "^2.10.2",
+    "mailparser": "^3.14.2",
+    "nodemailer": "^10.3.1"
+  },
+  "devDependencies": {
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0"
+  },
+  "keywords": [
+    "email",
+    "mail-client",
+    "imap",
+    "smtp",
+    "gmail",
+    "electron"
+  ],
+  "build": {
+    "appId": "io.github.liyucheng1997.huiyou-mail",
+    "productName": "Huiyou Mail",
+    "copyright": "Copyright © 2026 Yucheng LI",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "package.json",
+      "LICENSE",
+      "!node_modules/**/*.map",
+      "!node_modules/**/*.d.ts",
+      "!node_modules/**/{CHANGELOG,README,readme}.md",
+      "!node_modules/*/dist/esm/**"
+    ],
+    "npmRebuild": false,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Liyucheng1997",
+        "repo": "huiyou-mail"
+      }
+    ],
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "汇邮",
+      "uninstallDisplayName": "汇邮 Huiyou Mail",
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "artifactName": "Huiyou-Mail-Setup-${version}.exe"
+    },
+    "portable": {
+      "artifactName": "Huiyou-Mail-${version}-portable.exe"
+    }
+  }
+}

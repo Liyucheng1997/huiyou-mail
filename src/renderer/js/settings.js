@@ -1,0 +1,159 @@
+// 设置大面板：左侧分类，右侧内容（通用 / 账户 / 存储 / 关于）
+import { h, escapeHtml, fmtSize } from './util.js';
+import { icon } from './icons.js';
+import { state, api, loadAccounts, accountColorIndex, refreshUnread, loadMessages } from './state.js';
+import { openModal, toast, switchEl, segmented, confirmDialog } from './ui.js';
+import { openAccountDialog } from './account-dialog.js';
+import { applyTheme } from './theme.js';
+import { updateStatus } from './update.js';
+
+const SECTIONS = [
+  { id: 'general', label: '通用', icon: 'sliders' },
+  { id: 'accounts', label: '邮箱账户', icon: 'user' },
+  { id: 'storage', label: '存储', icon: 'database' },
+  { id: 'about', label: '关于与更新', icon: 'info' },
+];
+
+export function openSettings(section = 'general') {
+  const content = h(`<div class="settings">
+    <nav class="settings-nav">
+      <div class="settings-nav-title">设置</div>
+      ${SECTIONS.map((s) => `<button class="nav-item" data-s="${s.id}">${icon(s.icon, 17)}<span class="nav-label">${s.label}</span></button>`).join('')}
+    </nav>
+    <div class="settings-main"></div>
+  </div>`);
+  const m = openModal({ title: null, content, width: 880, className: 'settings-modal' });
+  const x = h(`<button class="modal-x settings-x" title="关闭">${icon('close', 14)}</button>`);
+  x.onclick = () => m.close();
+  m.el.appendChild(x);
+  const main = content.querySelector('.settings-main');
+  const show = (id) => {
+    content.querySelectorAll('.settings-nav .nav-item').forEach((b) => b.classList.toggle('active', b.dataset.s === id));
+    main.innerHTML = '';
+    main.scrollTop = 0;
+    ({ general, accounts, storage, about })[id](main, () => show(id));
+  };
+  content.querySelectorAll('.settings-nav .nav-item').forEach((b) => (b.onclick = () => show(b.dataset.s)));
+  show(section);
+}
+
+function pageHead(kicker, title, desc = '') {
+  return h(`<div class="page-head"><div class="kicker">${kicker}</div><div class="page-title">${escapeHtml(title)}</div>${desc ? `<div class="page-desc">${escapeHtml(desc)}</div>` : ''}</div>`);
+}
+
+function row(label, desc, control) {
+  const el = h(`<div class="set-row"><div class="set-text"><div class="set-label">${escapeHtml(label)}</div>${desc ? `<div class="set-desc">${escapeHtml(desc)}</div>` : ''}</div><div class="set-ctl"></div></div>`);
+  el.querySelector('.set-ctl').appendChild(control);
+  return el;
+}
+
+async function save(patch) {
+  state.settings = await api.settings.set(patch);
+}
+
+function general(main) {
+  const s = state.settings;
+  main.appendChild(pageHead('GENERAL', '通用'));
+  const card = h('<div class="set-card"></div>');
+  card.appendChild(
+    row('外观', '', segmented([{ label: '跟随系统', value: 'system' }, { label: '浅色', value: 'light' }, { label: '深色', value: 'dark' }], s.theme, async (v) => {
+      await save({ theme: v });
+      applyTheme();
+    }))
+  );
+  card.appendChild(
+    row('列表密度', '紧凑模式不显示邮件预览', segmented([{ label: '舒适', value: 'comfortable' }, { label: '紧凑', value: 'compact' }], s.density, async (v) => {
+      await save({ density: v });
+      document.documentElement.dataset.density = v;
+    }))
+  );
+  const interval = h(`<select class="input">${[1, 2, 3, 5, 10, 15, 30].map((n) => `<option value="${n}" ${n === Number(s.syncInterval) ? 'selected' : ''}>每 ${n} 分钟</option>`).join('')}</select>`);
+  interval.onchange = () => save({ syncInterval: Number(interval.value) });
+  card.appendChild(row('自动收信', '服务器推送的新邮件会立即收到；这里设置定时检查的间隔', interval));
+  main.appendChild(card);
+
+  const card2 = h('<div class="set-card"></div>');
+  card2.appendChild(row('新邮件通知', '窗口不在前台时，用系统通知提醒', switchEl(s.notifications, (v) => save({ notifications: v }))));
+  card2.appendChild(row('关闭窗口时留在托盘', '继续在后台收信；从托盘图标右键退出', switchEl(s.closeToTray, (v) => save({ closeToTray: v }))));
+  card2.appendChild(row('开机自动启动', '启动时最小化到托盘', switchEl(s.openAtLogin, (v) => save({ openAtLogin: v }))));
+  main.appendChild(card2);
+
+  const card3 = h('<div class="set-card"></div>');
+  card3.appendChild(row('打开邮件后标为已读', '', switchEl(s.markReadOnOpen !== false, (v) => save({ markReadOnOpen: v }))));
+  card3.appendChild(row('自动显示远程图片', '关闭时可防止发件人通过图片追踪你是否读过邮件', switchEl(s.loadRemoteImages, (v) => save({ loadRemoteImages: v }))));
+  main.appendChild(card3);
+}
+
+function accounts(main, refresh) {
+  main.appendChild(pageHead('ACCOUNTS', '邮箱账户', '密码和授权码用 Windows 系统加密保存在本机，不会上传到任何地方。'));
+  const card = h('<div class="set-card"></div>');
+  if (!state.accounts.length) card.appendChild(h('<div class="set-empty muted">还没有添加邮箱</div>'));
+  for (const a of state.accounts) {
+    const st = state.status[a.id] || {};
+    const el = h(`<div class="acc-row">
+      <span class="acc-badge lg acc-c${accountColorIndex(a.id)}">${escapeHtml(([...(a.label || a.name || a.email)][0] || '?').toUpperCase())}</span>
+      <div class="acc-text">
+        <div class="set-label">${escapeHtml(a.label ? `${a.label} · ${a.email}` : a.email)}</div>
+        <div class="set-desc">${st.state === 'error' ? `<span class="state-dot danger"></span>${escapeHtml(st.message || '')}` : `<span class="state-dot success"></span>${escapeHtml(a.imap.host)}`}</div>
+      </div>
+      <button class="btn btn-sm" data-a="edit">编辑</button>
+      <button class="btn btn-danger btn-sm" data-a="remove">移除</button>
+    </div>`);
+    el.querySelector('[data-a=edit]').onclick = async () => {
+      await openAccountDialog(a);
+    };
+    el.querySelector('[data-a=remove]').onclick = async () => {
+      const ok = await confirmDialog({ title: `移除 ${a.email}？`, message: '只会删除本机上的账户和缓存，服务器上的邮件不受影响。', okText: '移除', danger: true });
+      if (!ok) return;
+      await api.accounts.remove(a.id);
+      if (state.view.accountId === a.id) state.view = { type: 'unified', kind: 'inbox' };
+      await loadAccounts();
+      await refreshUnread();
+      await loadMessages({ keepSelection: false });
+      toast('已移除', 'success');
+      refresh();
+    };
+    card.appendChild(el);
+  }
+  main.appendChild(card);
+  const add = h(`<button class="btn btn-primary">${icon('plus', 15)}添加邮箱</button>`);
+  add.onclick = () => openAccountDialog();
+  main.appendChild(h('<div class="set-actions"></div>')).appendChild(add);
+}
+
+async function storage(main, refresh) {
+  main.appendChild(pageHead('STORAGE', '存储', '邮件列表和打开过的邮件原文会缓存在本机，离线也能查看。'));
+  const card = h('<div class="set-card"></div>');
+  const size = h('<span class="tabular muted">计算中…</span>');
+  card.appendChild(row('缓存大小', '', size));
+  const clear = h('<button class="btn btn-sm">清除邮件正文缓存</button>');
+  clear.onclick = async () => {
+    await api.cache.clear();
+    toast('已清除', 'success');
+    refresh();
+  };
+  card.appendChild(row('清除缓存', '只删除本机缓存的邮件正文，下次打开时会重新下载', clear));
+  main.appendChild(card);
+  size.textContent = fmtSize(await api.cache.size());
+}
+
+async function about(main) {
+  const info = await api.app.info();
+  main.appendChild(pageHead('ABOUT', '关于与更新'));
+  const card = h(`<div class="set-card about">
+    <div class="about-top">
+      <span class="logo-mark lg">汇</span>
+      <div><div class="about-name">汇邮</div><div class="set-desc">版本 <span class="tabular">${escapeHtml(info.version)}</span> · 把所有邮箱汇到一处</div></div>
+    </div>
+  </div>`);
+  const st = updateStatus();
+  const stText = { checking: '正在检查…', downloading: `正在下载 ${st.version || ''}（${st.percent || 0}%）`, downloaded: `${st.version} 已下载，重启即可更新`, none: '已是最新版本', available: `发现新版本 ${st.version}`, error: st.message || '' }[st.state] || '';
+  const check = h('<button class="btn btn-sm">检查更新</button>');
+  check.onclick = () => api.update.check();
+  card.appendChild(row('检查更新', stText, check));
+  card.appendChild(row('自动更新', '安装版会在后台下载新版本，退出时自动安装', switchEl(state.settings.autoUpdate, (v) => save({ autoUpdate: v }))));
+  const gh = h(`<button class="btn btn-ghost btn-sm">${icon('external', 14)}GitHub</button>`);
+  gh.onclick = () => api.app.openExternal('https://github.com/Liyucheng1997/huiyou-mail');
+  card.appendChild(row('项目主页', '下载、更新说明和问题反馈', gh));
+  main.appendChild(card);
+}
