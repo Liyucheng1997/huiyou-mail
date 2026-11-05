@@ -12,7 +12,8 @@
 - **搜索**：输入即在本地过滤，回车在服务器上搜索（Gmail 支持 Gmail 搜索语法）
 - **后台收信**：服务器推送（IDLE）+ 定时检查；新邮件系统通知，任务栏图标显示未读数，关闭窗口后留在托盘
 - **离线可读**：邮件列表和打开过的邮件缓存在本机
-- 浅色 / 深色 / 跟随系统；密码用 Windows 系统加密（safeStorage）保存在本机，不上传任何地方
+- **Gmail / Outlook 账号登录（OAuth）**：在浏览器里登录授权，不用应用专用密码；Outlook / Hotmail 个人账户只能这样登录
+- 浅色 / 深色 / 跟随系统；密码和授权令牌用 Windows 系统加密（safeStorage）保存在本机，不上传任何地方
 
 ## 下载
 
@@ -25,18 +26,40 @@
 
 安装包没有代码签名，Windows SmartScreen 可能拦截：点“更多信息 → 仍要运行”。
 
-## 添加邮箱：要用“授权码”，不是登录密码
+## 添加邮箱
+
+### Gmail / Outlook：用账号登录（推荐）
+
+选 Gmail 或 Outlook 后点“使用 Google / Microsoft 账号登录”，在浏览器里登录并授权，完成后自动回到汇邮。
+
+这需要一个**你自己的 OAuth 客户端**（免费，创建一次即可）。在汇邮的“设置 → 登录方式”里有逐步说明，填好就能用：
+
+**Google（Gmail）**
+
+1. 打开 [Google Cloud 控制台](https://console.cloud.google.com/auth/clients)，新建一个项目（名字随意）
+2. 进入“Google Auth Platform”，填写应用名称和邮箱，用户类型选“外部”
+3. 在“目标对象”里点“发布应用”改成正式版，否则每 7 天要重新登录一次。登录时会看到“Google 尚未验证此应用”，点“高级 → 继续”即可（这是你自己的应用）
+4. 在“客户端”里新建客户端，类型选“桌面应用”，把客户端 ID 和客户端密钥填到汇邮里
+
+**Microsoft（Outlook / Hotmail / Microsoft 365）**
+
+1. 打开 [Microsoft Entra 应用注册](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) → 新注册（需要一个免费的 Azure 账号）
+2. “受支持的帐户类型”选“任何组织目录中的帐户和个人 Microsoft 帐户”
+3. “重定向 URI”平台选“公共客户端/本机(移动和桌面)”，填 `http://localhost`
+4. 把“应用程序(客户端) ID”填到汇邮里
+
+登录用 PKCE + 本机回环地址（`127.0.0.1` / `localhost` 随机端口）接收授权，账号密码只在浏览器里输入，汇邮只保存加密后的 refresh token。
+
+### 其他邮箱：要用“授权码”，不是登录密码
 
 | 邮箱 | 需要填写 | 在哪里获取 |
 | --- | --- | --- |
-| Gmail | 应用专用密码（16 位） | 先开启两步验证，再到 <https://myaccount.google.com/apppasswords> 生成 |
+| Gmail（不用账号登录时） | 应用专用密码（16 位） | 先开启两步验证，再到 <https://myaccount.google.com/apppasswords> 生成 |
 | QQ 邮箱 | 授权码 | 网页版 → 设置 → 账号与安全 → 开启 IMAP/SMTP 服务 |
 | 网易 163 / 126 | 授权码 | 网页版 → 设置 → POP3/SMTP/IMAP → 开启 IMAP/SMTP 服务 |
 | iCloud | App 专用密码 | account.apple.com → 登录与安全 → App 专用密码 |
 | Yahoo | 应用密码 | 账户安全 → 生成应用密码 |
 | 企业邮 / 自建邮箱 | 密码或客户端专用密码 | 选“其他邮箱”，在“服务器设置”里填写 IMAP / SMTP 地址 |
-
-> Outlook / Hotmail 个人账户：微软已不允许用密码登录第三方客户端（只允许 OAuth），目前可能连不上。可以在 Outlook 网页版设置里把邮件自动转发到你的其他邮箱。
 
 ## 快捷键
 
@@ -55,6 +78,8 @@ npm install
 npm start          # 运行
 npm run dist       # 打包安装版 + 便携版到 dist/
 ```
+
+想让打包出来的版本自带 OAuth 客户端（用户不用自己创建），把客户端 ID 填进 `src/main/oauth-clients.js`。开发时也可以用环境变量 `HUIYOU_GOOGLE_CLIENT_ID`、`HUIYOU_GOOGLE_CLIENT_SECRET`、`HUIYOU_MICROSOFT_CLIENT_ID`。
 
 技术栈：Electron、[imapflow](https://github.com/postalsys/imapflow)（IMAP）、[nodemailer](https://nodemailer.com/)（SMTP）、[mailparser](https://github.com/nodemailer/mailparser)（解析邮件）。界面是原生 HTML/CSS/JS，没有前端框架。
 

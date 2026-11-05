@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS = {
   autoUpdate: true,
   density: 'comfortable', // comfortable | compact
   markReadOnOpen: true,
+  oauthClients: {}, // { google: { clientId, clientSecret }, microsoft: { clientId } }
 };
 
 let settingsCache = null;
@@ -68,9 +69,9 @@ const accounts = {
     if (!accountsCache) accountsCache = readJson('accounts.json', []);
     return accountsCache;
   },
-  // 给渲染进程的版本：去掉密码
+  // 给渲染进程的版本：去掉密码和 OAuth 令牌
   publicList() {
-    return accounts.list().map(({ password, ...rest }) => ({ ...rest, hasPassword: !!password }));
+    return accounts.list().map(({ password, refreshToken, ...rest }) => ({ ...rest, hasPassword: !!password, hasToken: !!refreshToken }));
   },
   get(id) {
     return accounts.list().find((a) => a.id === id) || null;
@@ -79,12 +80,31 @@ const accounts = {
     const a = accounts.get(id);
     return a ? decrypt(a.password) : '';
   },
-  save(account, plainPassword) {
+  refreshToken(id) {
+    const a = accounts.get(id);
+    return a ? decrypt(a.refreshToken) : '';
+  },
+  setRefreshToken(id, token) {
+    const a = accounts.get(id);
+    if (!a) return;
+    a.refreshToken = encrypt(token);
+    writeJson('accounts.json', accounts.list());
+  },
+  // secret: { password } 或 { refreshToken }；换了登录方式就清掉另一种凭据
+  save(account, secret = {}) {
     const list = accounts.list();
     const i = list.findIndex((a) => a.id === account.id);
     const prev = i >= 0 ? list[i] : {};
     const next = { ...prev, ...account };
-    if (plainPassword) next.password = encrypt(plainPassword);
+    delete next.hasPassword;
+    delete next.hasToken;
+    if (secret.refreshToken) {
+      next.refreshToken = encrypt(secret.refreshToken);
+      delete next.password;
+    } else if (secret.password) {
+      next.password = encrypt(secret.password);
+      delete next.refreshToken;
+    }
     if (i >= 0) list[i] = next;
     else list.push(next);
     writeJson('accounts.json', list);

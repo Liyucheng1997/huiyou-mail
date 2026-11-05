@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('api', {
     remove: call('accounts:remove'),
     reorder: call('accounts:reorder'),
   },
+  oauth: { status: call('oauth:status'), start: call('oauth:start'), cancel: call('oauth:cancel') },
   mail: {
     syncAll: call('mail:sync-all'),
     statusAll: call('mail:status-all'),

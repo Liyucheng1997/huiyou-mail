@@ -6,6 +6,7 @@ const PROVIDERS = {
     imap: { host: 'imap.gmail.com', port: 993, secure: true },
     smtp: { host: 'smtp.gmail.com', port: 465, secure: true },
     saveSent: false, // Gmail 发信后会自动存进“已发送”
+    oauth: 'google',
     passwordLabel: '应用专用密码',
     help: '先在 Google 账号里开启“两步验证”，再到“应用专用密码”页面生成一个 16 位密码，粘贴到这里（不是你的 Google 登录密码）。',
     helpUrl: 'https://myaccount.google.com/apppasswords',
@@ -106,8 +107,9 @@ const PROVIDERS = {
     imap: { host: 'outlook.office365.com', port: 993, secure: true },
     smtp: { host: 'smtp-mail.outlook.com', port: 587, secure: false },
     saveSent: false,
+    oauth: 'microsoft',
     passwordLabel: '密码',
-    help: '微软已关闭个人 Outlook 账户的密码登录（只允许 OAuth）。如果连接失败，可以在 Outlook 网页版设置里把邮件自动转发到你的其他邮箱。',
+    help: '微软已关闭 Outlook / Hotmail 个人账户的密码登录，请用上面的“使用 Microsoft 账号登录”。工作或学校账户如果管理员仍允许密码登录，也可以填密码。',
     helpUrl: 'https://outlook.live.com/',
   },
   custom: {

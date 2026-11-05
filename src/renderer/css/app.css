@@ -342,3 +342,26 @@
 .prov-ico.small { font-size: 11px; letter-spacing: -0.02em; }
 .modal-footer .form-error { flex: 1; min-width: 0; margin-right: 8px; font-size: 12.5px; align-items: flex-start; }
 .modal-footer .form-error .state-dot { margin-top: 6px; }
+
+/* ---------- 浏览器登录（OAuth） ---------- */
+.oauth-box { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 14px; background: var(--panel-2); }
+.oauth-state { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
+.oauth-state:empty { display: none; }
+.oauth-actions { display: flex; align-items: center; gap: 8px; }
+.oauth-btn { height: 38px; padding: 0 20px; font-size: 14px; }
+.oauth-btn:disabled { opacity: 1; cursor: default; }
+.oauth-note { font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.oauth-warn { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+.oauth-warn .btn { margin-left: auto; }
+.link-btn { align-self: flex-start; border: 0; padding: 2px 0; background: none; color: var(--primary); font-size: 12.5px; }
+.link-btn:hover { text-decoration: underline; }
+
+/* 设置 → 登录方式 */
+.oauth-card .set-row { align-items: flex-start; }
+.oauth-fields { display: flex; flex-direction: column; gap: 8px; padding: 4px 0 14px; }
+.oauth-fields .input { width: 100%; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 12.5px; }
+.oauth-steps { margin: 0; padding: 0 0 4px 18px; font-size: 12.5px; line-height: 1.75; color: var(--text-2); }
+.oauth-steps code { font-size: 12px; padding: 1px 5px; border-radius: 6px; background: var(--fill); color: var(--text); user-select: all; }
+.oauth-head { display: flex; align-items: center; gap: 10px; padding: 14px 0 10px; }
+.oauth-head .set-label { flex: 1; }
+.oauth-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }

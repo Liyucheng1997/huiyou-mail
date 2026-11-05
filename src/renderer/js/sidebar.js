@@ -97,8 +97,8 @@ function accountSection(acc) {
   };
   const body = sec.querySelector('.nav-account-body');
   if (st.state === 'error') {
-    const err = h(`<button class="nav-error" title="点击重试">${escapeHtml(st.message || '同步失败')}</button>`);
-    err.onclick = () => syncAccount(acc);
+    const err = h(`<button class="nav-error" title="${st.reauth ? '点击重新登录' : '点击重试'}">${escapeHtml(st.message || '同步失败')}</button>`);
+    err.onclick = () => (st.reauth ? openAccountDialog(acc) : syncAccount(acc));
     body.appendChild(err);
   }
   if (!folders.length && st.state !== 'error') body.appendChild(h('<div class="nav-hint">正在读取文件夹…</div>'));

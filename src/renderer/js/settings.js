@@ -10,6 +10,7 @@ import { updateStatus } from './update.js';
 const SECTIONS = [
   { id: 'general', label: '通用', icon: 'sliders' },
   { id: 'accounts', label: '邮箱账户', icon: 'user' },
+  { id: 'signin', label: '登录方式', icon: 'shield' },
   { id: 'storage', label: '存储', icon: 'database' },
   { id: 'about', label: '关于与更新', icon: 'info' },
 ];
@@ -31,7 +32,7 @@ export function openSettings(section = 'general') {
     content.querySelectorAll('.settings-nav .nav-item').forEach((b) => b.classList.toggle('active', b.dataset.s === id));
     main.innerHTML = '';
     main.scrollTop = 0;
-    ({ general, accounts, storage, about })[id](main, () => show(id));
+    ({ general, accounts, signin, storage, about })[id](main, () => show(id));
   };
   content.querySelectorAll('.settings-nav .nav-item').forEach((b) => (b.onclick = () => show(b.dataset.s)));
   show(section);
@@ -94,7 +95,7 @@ function accounts(main, refresh) {
       <span class="acc-badge lg acc-c${accountColorIndex(a.id)}">${escapeHtml(([...(a.label || a.name || a.email)][0] || '?').toUpperCase())}</span>
       <div class="acc-text">
         <div class="set-label">${escapeHtml(a.label ? `${a.label} · ${a.email}` : a.email)}</div>
-        <div class="set-desc">${st.state === 'error' ? `<span class="state-dot danger"></span>${escapeHtml(st.message || '')}` : `<span class="state-dot success"></span>${escapeHtml(a.imap.host)}`}</div>
+        <div class="set-desc">${st.state === 'error' ? `<span class="state-dot danger"></span>${escapeHtml(st.message || '')}` : `<span class="state-dot success"></span>${escapeHtml(a.auth === 'oauth2' ? `通过 ${a.oauthProvider === 'microsoft' ? 'Microsoft' : 'Google'} 登录 · ${a.imap.host}` : a.imap.host)}`}</div>
       </div>
       <button class="btn btn-sm" data-a="edit">编辑</button>
       <button class="btn btn-danger btn-sm" data-a="remove">移除</button>
@@ -119,6 +120,75 @@ function accounts(main, refresh) {
   const add = h(`<button class="btn btn-primary">${icon('plus', 15)}添加邮箱</button>`);
   add.onclick = () => openAccountDialog();
   main.appendChild(h('<div class="set-actions"></div>')).appendChild(add);
+}
+
+// Gmail / Outlook 的浏览器登录需要用户自己的 OAuth 客户端
+const OAUTH_GUIDE = {
+  google: {
+    title: 'Google（Gmail）',
+    url: 'https://console.cloud.google.com/auth/clients',
+    urlText: '打开 Google Cloud 控制台',
+    steps: [
+      '在 Google Cloud 控制台新建一个项目，名字随意，例如“汇邮”。',
+      '进入“Google Auth Platform”，按提示填写应用名称和你的邮箱，用户类型选“外部”。',
+      '在“目标对象”里点“发布应用”改成正式版，否则每 7 天要重新登录一次。登录时看到“Google 尚未验证此应用”，点“高级 → 继续”即可，这是你自己的应用。',
+      '在“客户端”里新建客户端，应用类型选“桌面应用”，把客户端 ID 和客户端密钥粘贴到下面。',
+    ],
+    fields: [
+      { key: 'clientId', placeholder: '客户端 ID（以 .apps.googleusercontent.com 结尾）' },
+      { key: 'clientSecret', placeholder: '客户端密钥（以 GOCSPX- 开头）' },
+    ],
+  },
+  microsoft: {
+    title: 'Microsoft（Outlook / Hotmail / Microsoft 365）',
+    url: 'https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+    urlText: '打开 Microsoft Entra',
+    steps: [
+      '在 Microsoft Entra 管理中心打开“应用注册 → 新注册”（需要一个免费的 Azure 账号）。',
+      '“受支持的帐户类型”选“任何组织目录中的帐户和个人 Microsoft 帐户”。',
+      '“重定向 URI”的平台选“公共客户端/本机(移动和桌面)”，地址填 <code>http://localhost</code>。',
+      '注册完成后，把“应用程序(客户端) ID”粘贴到下面。',
+    ],
+    fields: [{ key: 'clientId', placeholder: '应用程序(客户端) ID，形如 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' }],
+  },
+};
+
+async function signin(main) {
+  main.appendChild(
+    pageHead('SIGN-IN', '登录方式', 'Gmail 和 Outlook 可以直接用账号在浏览器里登录，不用应用专用密码。这需要一个属于你自己的 OAuth 客户端，按下面的步骤创建一次即可，免费。')
+  );
+  const st = await api.oauth.status();
+  for (const [id, g] of Object.entries(OAUTH_GUIDE)) {
+    const saved = (state.settings.oauthClients || {})[id] || {};
+    const card = h(`<div class="set-card oauth-card">
+      <div class="oauth-head"><div class="set-label">${escapeHtml(g.title)}</div><span class="oauth-badge"></span></div>
+      <ol class="oauth-steps">${g.steps.map((t) => `<li>${t}</li>`).join('')}</ol>
+      <div class="oauth-fields">
+        ${g.fields.map((f) => `<input class="input" data-k="${f.key}" placeholder="${escapeHtml(f.placeholder)}" spellcheck="false" autocomplete="off">`).join('')}
+        <div><button class="btn btn-ghost btn-sm" data-a="open">${icon('external', 14)}${g.urlText}</button></div>
+      </div>
+    </div>`);
+    const badge = card.querySelector('.oauth-badge');
+    const paint = (s) => {
+      badge.innerHTML = s.configured
+        ? `<span class="state-dot success"></span>${s.source === 'builtin' ? '使用内置客户端' : '已配置'}`
+        : '<span class="state-dot"></span>未配置';
+    };
+    paint(st[id]);
+    card.querySelectorAll('[data-k]').forEach((input) => {
+      input.value = saved[input.dataset.k] || '';
+      input.onchange = async () => {
+        const all = { ...(state.settings.oauthClients || {}) };
+        all[id] = { ...(all[id] || {}), [input.dataset.k]: input.value.trim() };
+        await save({ oauthClients: all });
+        paint((await api.oauth.status())[id]);
+        toast('已保存', 'success', 1500);
+      };
+    });
+    card.querySelector('[data-a=open]').onclick = () => api.app.openExternal(g.url);
+    main.appendChild(card);
+  }
+  main.appendChild(h('<div class="set-desc muted">客户端 ID 只保存在本机。登录时的账号密码在浏览器里输入，不经过汇邮；汇邮只保存加密后的授权令牌。</div>'));
 }
 
 async function storage(main, refresh) {

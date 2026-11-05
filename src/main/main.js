@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const store = require('./store');
 const mail = require('./mail-service');
 const providers = require('./providers');
+const oauth = require('./oauth');
 const updater = require('./update-service');
 
 const isDev = process.argv.includes('--dev');
@@ -142,7 +143,12 @@ const firstRun = new Set();
 async function syncAccount(id) {
   try {
     if (!firstRun.has(id)) {
-      await mail.listFolders(id);
+      try {
+        await mail.listFolders(id);
+      } catch (err) {
+        mail.reportError(id, err);
+        throw err;
+      }
       firstRun.add(id);
       send('mail:folders', { accountId: id });
     }
@@ -226,17 +232,40 @@ function registerIpc() {
   });
 
   handle('accounts:list', () => store.accounts.publicList());
-  handle('accounts:test', async ({ account, password }) => {
-    const pass = password || (account.id ? store.accounts.password(account.id) : '');
-    return mail.testAccount(account, pass);
+  // oauthTicket：刚在浏览器里登录拿到的“票”；否则用填的密码，或已保存的凭据
+  async function credentialsFor(account, password, oauthTicket) {
+    if (oauthTicket) return { accessToken: oauth.ticket(oauthTicket).accessToken };
+    if (password) return { pass: password };
+    const saved = account.id && store.accounts.get(account.id);
+    if (saved && saved.auth === 'oauth2') return { accessToken: await oauth.accessToken(saved) };
+    return { pass: account.id ? store.accounts.password(account.id) : '' };
+  }
+  handle('accounts:test', async ({ account, password, oauthTicket }) => {
+    const cred = await credentialsFor(account, password, oauthTicket);
+    const acc = oauthTicket ? { ...account, auth: 'oauth2', oauthProvider: oauth.ticket(oauthTicket).provider } : account;
+    return mail.testAccount(acc, cred);
   });
-  handle('accounts:save', async ({ account, password }) => {
+  handle('accounts:save', async ({ account, password, oauthTicket }) => {
     const isNew = !account.id;
     if (isNew) {
       account.id = crypto.randomUUID();
       account.createdAt = Date.now();
     }
-    const saved = store.accounts.save(account, password);
+    let secret = {};
+    if (oauthTicket) {
+      const t = oauth.ticket(oauthTicket);
+      account.auth = 'oauth2';
+      account.oauthProvider = t.provider;
+      secret = { refreshToken: t.refreshToken };
+      oauth.prime(account.id, t);
+      oauth.dropTicket(oauthTicket);
+    } else if (password) {
+      account.auth = 'password';
+      delete account.oauthProvider;
+      secret = { password };
+      oauth.forget(account.id);
+    }
+    const saved = store.accounts.save(account, secret);
     await mail.disconnect(saved.id);
     firstRun.delete(saved.id);
     syncAccount(saved.id);
@@ -244,11 +273,27 @@ function registerIpc() {
   });
   handle('accounts:remove', async (id) => {
     await mail.disconnect(id);
+    oauth.forget(id);
     store.accounts.remove(id);
     mail.removeAccountCache(id);
     firstRun.delete(id);
   });
   handle('accounts:reorder', (ids) => store.accounts.reorder(ids));
+
+  handle('oauth:status', () => oauth.status());
+  handle('oauth:start', async ({ provider, loginHint }) => {
+    try {
+      return await oauth.authorize(provider, { loginHint });
+    } finally {
+      // 浏览器里登录完，把汇邮带回前台
+      if (win) {
+        if (win.isMinimized()) win.restore();
+        win.show();
+        win.focus();
+      }
+    }
+  });
+  handle('oauth:cancel', () => oauth.cancel());
 
   handle('mail:sync-all', () => syncAll());
   handle('mail:status-all', () => mail.statusAll());

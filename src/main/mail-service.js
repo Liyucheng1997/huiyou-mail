@@ -8,6 +8,7 @@ const nodemailer = require('nodemailer');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const { simpleParser } = require('mailparser');
 const store = require('./store');
+const oauth = require('./oauth');
 const { makeSnippet, findTextPart, hasAttachments, guessSpecial, sortFolders, SPECIAL_NAMES } = require('./mail-text');
 
 const INITIAL_COUNT = 150; // 第一次同步一个文件夹时拉取的邮件数
@@ -56,12 +57,23 @@ function saveFolders(id, list) {
 }
 
 // ---------- 连接 ----------
-function imapOptions(acc, pass) {
+// 凭据：密码 / 授权码账户是 { pass }，OAuth 账户是 { accessToken }（过期前自动刷新）
+async function credentials(acc) {
+  if (acc.auth === 'oauth2') return { accessToken: await oauth.accessToken(acc) };
+  return { pass: store.accounts.password(acc.id) };
+}
+
+function authOf(acc, cred) {
+  const user = acc.username || acc.email;
+  return cred.accessToken ? { user, accessToken: cred.accessToken } : { user, pass: cred.pass };
+}
+
+function imapOptions(acc, cred) {
   return {
     host: acc.imap.host,
     port: Number(acc.imap.port) || 993,
     secure: !!acc.imap.secure,
-    auth: { user: acc.username || acc.email, pass },
+    auth: authOf(acc, cred),
     logger: false,
     clientInfo: { name: 'Huiyou Mail', version: app.getVersion(), vendor: 'Huiyou' }, // 网易邮箱要求客户端发送 ID
     tls: { rejectUnauthorized: !acc.allowInsecure },
@@ -71,10 +83,19 @@ function imapOptions(acc, pass) {
   };
 }
 
-function friendlyError(err) {
+function isAuthFailure(err) {
+  const msg = String((err && (err.responseText || err.message)) || err || '');
+  return !!(err && (err.authenticationFailed || /AUTHENTICATIONFAILED|Invalid credentials|LOGIN failed|authentication failed|535|AUTHENTICATE failed/i.test(msg)));
+}
+
+function friendlyError(err, acc = null) {
   const msg = String((err && (err.responseText || err.message)) || err || '未知错误');
-  if (err && (err.authenticationFailed || /AUTHENTICATIONFAILED|Invalid credentials|LOGIN failed|authentication failed|535/i.test(msg)))
-    return '登录失败：请确认使用的是授权码 / 应用专用密码，并已在网页版开启 IMAP/SMTP';
+  if (err && (err.reauth || err.noClient || err.network)) return err.message;
+  if (isAuthFailure(err) && acc && acc.auth === 'oauth2') {
+    const name = (oauth.PROVIDERS[acc.oauthProvider] || {}).name || '';
+    return `${name} 拒绝了登录：授权可能已失效，或网页版邮箱没有开启 IMAP，请在账户设置里重新登录`;
+  }
+  if (isAuthFailure(err)) return '登录失败：请确认使用的是授权码 / 应用专用密码，并已在网页版开启 IMAP/SMTP';
   if (/Unsafe Login/i.test(msg)) return '网易拦截了这次登录（Unsafe Login），请在网页版邮箱里确认已开启 IMAP 服务';
   if (/ENOTFOUND|EAI_AGAIN/.test(msg)) return '找不到服务器，请检查服务器地址和网络';
   if (/ETIMEDOUT|timeout/i.test(msg)) return '连接超时，请检查网络或代理';
@@ -86,7 +107,10 @@ function friendlyError(err) {
 const lastStatus = {}; // 界面刷新后能拿回各账户的同步状态
 function status(accountId, s) {
   lastStatus[accountId] = { ...(lastStatus[accountId] || {}), ...s, accountId };
-  if (s.state !== 'error') delete lastStatus[accountId].message;
+  if (s.state !== 'error') {
+    delete lastStatus[accountId].message;
+    delete lastStatus[accountId].reauth;
+  }
   emit('mail:status', lastStatus[accountId]);
 }
 
@@ -99,7 +123,7 @@ async function getClient(accountId) {
   entry = entry || {};
   clients.set(accountId, entry);
   entry.connecting = (async () => {
-    const client = new ImapFlow(imapOptions(acc, store.accounts.password(accountId)));
+    const client = new ImapFlow(imapOptions(acc, await credentials(acc)));
     client.on('error', () => {}); // 错误在调用处处理；这里防止未捕获异常
     client.on('close', () => {
       if (entry.client === client) entry.client = null;
@@ -107,7 +131,12 @@ async function getClient(accountId) {
     client.on('exists', (info) => {
       if (info && info.count > info.prevCount) scheduleSync(accountId, info.path);
     });
-    await client.connect();
+    try {
+      await client.connect();
+    } catch (err) {
+      if (acc.auth === 'oauth2' && isAuthFailure(err)) oauth.forget(accountId); // 下次重新换一个 access token
+      throw err;
+    }
     entry.client = client;
     entry.capabilities = client.capabilities;
     return client;
@@ -147,6 +176,7 @@ async function withMailbox(accountId, p, fn, retry = true) {
       lock.release();
     }
   } catch (err) {
+    if (err && (err.reauth || err.noClient || err.network)) throw err; // 重连也没用
     const dropped = !client || !client.usable || /Connection not available|closed|ECONNRESET|EPIPE|socket/i.test(String(err && err.message));
     if (retry && dropped) {
       const entry = clients.get(accountId);
@@ -278,6 +308,15 @@ function scheduleSync(accountId, p) {
   );
 }
 
+// 把错误告诉界面（侧栏红字 / 状态栏），返回给用户看的说明
+function reportError(accountId, err, p = null) {
+  const acc = store.accounts.get(accountId);
+  const message = friendlyError(err, acc);
+  const reauth = !!err.reauth || !!(acc && acc.auth === 'oauth2' && isAuthFailure(err));
+  status(accountId, { state: 'error', path: p, message, reauth });
+  return message;
+}
+
 function syncFolder(accountId, p) {
   const key = accountId + '\n' + p;
   if (syncing.has(key)) return syncing.get(key);
@@ -289,8 +328,7 @@ function syncFolder(accountId, p) {
       emit('mail:changed', { accountId, path: p, newMessages: result.newMessages });
       return result;
     } catch (err) {
-      status(accountId, { state: 'error', path: p, message: friendlyError(err) });
-      throw new Error(friendlyError(err));
+      throw new Error(reportError(accountId, err, p));
     }
   })();
   syncing.set(key, run);
@@ -568,12 +606,13 @@ async function createFolder(accountId, name) {
 }
 
 // ---------- 发信 ----------
-function smtpTransport(acc, pass) {
+function smtpTransport(acc, cred) {
+  const auth = authOf(acc, cred);
   return nodemailer.createTransport({
     host: acc.smtp.host,
     port: Number(acc.smtp.port) || 465,
     secure: !!acc.smtp.secure,
-    auth: { user: acc.username || acc.email, pass },
+    auth: auth.accessToken ? { type: 'OAuth2', user: auth.user, accessToken: auth.accessToken } : auth,
     tls: { rejectUnauthorized: !acc.allowInsecure },
     connectionTimeout: 30000,
   });
@@ -645,14 +684,16 @@ async function send(draft) {
   const raw = await node.build();
   node.keepBcc = true;
   const archived = await node.build(); // 同一个 Message-ID 的存档版本
-  const transport = smtpTransport(acc, store.accounts.password(acc.id));
+  let transport;
   try {
+    transport = smtpTransport(acc, await credentials(acc));
     const recipients = [draft.to, draft.cc, draft.bcc].flat().filter(Boolean).map((r) => (typeof r === 'string' ? r : r.address));
     await transport.sendMail({ envelope: { from: acc.email, to: recipients }, raw });
   } catch (err) {
-    throw new Error('发送失败：' + friendlyError(err));
+    if (acc.auth === 'oauth2' && isAuthFailure(err)) oauth.forget(acc.id);
+    throw new Error('发送失败：' + friendlyError(err, acc));
   } finally {
-    transport.close();
+    if (transport) transport.close();
   }
   // 存一份到“已发送”（Gmail 等会自动保存的跳过）
   if (acc.saveSent !== false) {
@@ -688,23 +729,24 @@ async function saveDraft(draft) {
 }
 
 // ---------- 账户测试 ----------
-async function testAccount(acc, pass) {
-  const client = new ImapFlow(imapOptions(acc, pass));
+// cred: { pass } 或 { accessToken }
+async function testAccount(acc, cred) {
+  const client = new ImapFlow(imapOptions(acc, cred));
   client.on('error', () => {});
   try {
     await client.connect();
   } catch (err) {
-    throw new Error('收信服务器（IMAP）：' + friendlyError(err));
+    throw new Error('收信服务器（IMAP）：' + friendlyError(err, acc));
   } finally {
     try {
       await client.logout();
     } catch {}
   }
-  const transport = smtpTransport(acc, pass);
+  const transport = smtpTransport(acc, cred);
   try {
     await transport.verify();
   } catch (err) {
-    throw new Error('发信服务器（SMTP）：' + friendlyError(err));
+    throw new Error('发信服务器（SMTP）：' + friendlyError(err, acc));
   } finally {
     transport.close();
   }
@@ -742,6 +784,7 @@ function clearBodyCache() {
 module.exports = {
   init: (opts) => (emit = opts.emit),
   statusAll: () => lastStatus,
+  reportError,
   listFolders,
   loadFolders,
   inboxPath,
