@@ -214,11 +214,12 @@ function registerIpc() {
   handle('app:set-title-colors', (dark) => {
     if (win) win.setTitleBarOverlay(titleColors(dark));
   });
-  handle('app:set-badge', ({ count, dataUrl }) => {
+  // count：你不在时新来的邮件数（任务栏角标）；unread：总未读数（只放在托盘提示里）
+  handle('app:set-badge', ({ count, unread = 0, dataUrl }) => {
     if (!win) return;
-    win.setOverlayIcon(count > 0 && dataUrl ? nativeImage.createFromDataURL(dataUrl) : null, count > 0 ? `${count} 封未读` : '');
-    win.setTitle(count > 0 ? `${APP_NAME}（${count}）` : APP_NAME);
-    if (tray) tray.setToolTip(count > 0 ? `${APP_NAME} · ${count} 封未读` : APP_NAME);
+    win.setOverlayIcon(count > 0 && dataUrl ? nativeImage.createFromDataURL(dataUrl) : null, count > 0 ? `${count} 封新邮件` : '');
+    win.setTitle(count > 0 ? `${APP_NAME}（${count} 封新邮件）` : APP_NAME);
+    if (tray) tray.setToolTip(unread > 0 ? `${APP_NAME} · ${unread} 封未读` : APP_NAME);
   });
   handle('app:system-dark', () => nativeTheme.shouldUseDarkColors);
 

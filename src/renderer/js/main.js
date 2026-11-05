@@ -165,7 +165,8 @@ function renderStatus(keep = false) {
   }
 }
 
-// ---------- 未读角标（任务栏图标上的小红点数字） ----------
+// ---------- 任务栏角标：只数你不在时新来的邮件，切回汇邮就清零 ----------
+// （总未读数大多是没用的旧邮件，挂个 99+ 没意义）
 function drawBadge(count) {
   if (!count) return null;
   const c = document.createElement('canvas');
@@ -183,12 +184,14 @@ function drawBadge(count) {
   return c.toDataURL();
 }
 
-let lastBadge = -1;
+let fresh = 0;
+let lastBadge = '';
 function updateBadge() {
-  const count = Object.values(state.unread).reduce((a, b) => a + b, 0);
-  if (count === lastBadge) return;
-  lastBadge = count;
-  api.app.setBadge({ count, dataUrl: drawBadge(count) });
+  const unread = Object.values(state.unread).reduce((a, b) => a + b, 0);
+  const key = `${fresh}/${unread}`;
+  if (key === lastBadge) return;
+  lastBadge = key;
+  api.app.setBadge({ count: fresh, unread, dataUrl: drawBadge(fresh) });
 }
 
 // ---------- 主进程事件 ----------
@@ -197,7 +200,15 @@ function wireEvents() {
   updateBadge();
 
   const reload = debounce(() => loadMessages(), 150);
-  api.mail.onChanged(({ accountId, path }) => {
+  window.addEventListener('focus', () => {
+    fresh = 0;
+    updateBadge();
+  });
+  api.mail.onChanged(({ accountId, path, newMessages }) => {
+    if (newMessages && newMessages.length && path === inboxOf(accountId) && !document.hasFocus()) {
+      fresh += newMessages.length;
+      updateBadge();
+    }
     const v = state.view;
     if (v.type === 'unified' || (v.accountId === accountId && v.path === path)) reload();
     refreshUnread();

@@ -161,7 +161,15 @@ function signatureHtml(acc) {
   return `<div class="sig">-- <br>${escapeHtml(acc.signature).replace(/\n/g, '<br>')}</div>`;
 }
 
-const ownAddresses = () => new Set(state.accounts.map((a) => a.email.toLowerCase()));
+const ownAddresses = () => new Set(state.accounts.flatMap((a) => [a.email, ...(a.aliases || [])]).map((x) => x.toLowerCase()));
+// 可选的发件地址：每个账户的主地址 + 它的别名
+const senderList = () => state.accounts.flatMap((a) => [a.email, ...(a.aliases || [])].map((address) => ({ accountId: a.id, address, acc: a })));
+// 原邮件是发给（或来自）哪个别名的，就默认用那个别名
+function pickAlias(acc, list) {
+  const aliases = new Set((acc && acc.aliases) || []);
+  const hit = list.find((a) => a && aliases.has((a.address || '').toLowerCase()));
+  return hit ? hit.address.toLowerCase() : '';
+}
 const prefix = (p, s) => (new RegExp('^' + p + '\\s*[:：]', 'i').test(s || '') ? s : `${p}: ${s || ''}`);
 
 // 根据模式准备初始内容
@@ -182,7 +190,7 @@ function applyPrefill(init, pf) {
 async function prepare(opts) {
   const { mode, source } = opts;
   let accountId = opts.accountId || (source && source.accountId) || (state.view.accountId && accountById(state.view.accountId) ? state.view.accountId : state.accounts[0]?.id);
-  const init = { accountId, to: [], cc: [], bcc: [], subject: '', body: '', attachments: [], carry: null, inReplyTo: '', references: [], replyTo: null, draftOf: null };
+  const init = { accountId, from: '', to: [], cc: [], bcc: [], subject: '', body: '', attachments: [], carry: null, inReplyTo: '', references: [], replyTo: null, draftOf: null };
   if (opts.to) init.to = [parseAddr(opts.to)].filter(Boolean);
   if (mode === 'new' || !source) {
     init.body = `<div><br></div>${signatureHtml(accountById(accountId))}`;
@@ -201,6 +209,7 @@ async function prepare(opts) {
       subject: msg.subject,
       body: originalHtml(msg),
       draftOf: { accountId: source.accountId, path: source.path, uid: source.uid },
+      from: pickAlias(acc, [msg.from]),
       inReplyTo: msg.inReplyTo,
       references: msg.references,
     });
@@ -208,6 +217,7 @@ async function prepare(opts) {
     return init;
   }
 
+  init.from = pickAlias(acc, [msg.from, ...msg.to, ...msg.cc]);
   if (mode === 'reply' || mode === 'replyAll') {
     const replyTo = msg.replyTo && msg.replyTo.length ? msg.replyTo : [msg.from];
     // 回复自己发出的邮件时，收件人用原来的收件人
@@ -299,8 +309,13 @@ export async function openCompose(opts = { mode: 'new' }) {
   for (const [k, f] of Object.entries(fields)) content.querySelector(`[data-f=${k}]`).appendChild(f.el);
 
   const fromSel = content.querySelector('.cf-from');
-  for (const a of state.accounts) fromSel.appendChild(h(`<option value="${a.id}">${escapeHtml(a.name ? `${a.name} <${a.email}>` : a.email)}</option>`));
-  fromSel.value = init.accountId;
+  const senders = senderList();
+  senders.forEach((s, i) => fromSel.appendChild(h(`<option value="${i}">${escapeHtml(s.acc.name ? `${s.acc.name} <${s.address}>` : s.address)}</option>`)));
+  const initFrom = (init.from || '').toLowerCase();
+  const chosen = senders.findIndex((s) => s.accountId === init.accountId && initFrom && s.address.toLowerCase() === initFrom);
+  fromSel.value = String(chosen >= 0 ? chosen : Math.max(0, senders.findIndex((s) => s.accountId === init.accountId)));
+  const sender = () => senders[Number(fromSel.value)] || senders[0];
+  let sigAccount = sender().accountId;
   const subject = content.querySelector('.cf-subject');
   subject.value = init.subject;
   const body = content.querySelector('.cf-body');
@@ -373,11 +388,13 @@ export async function openCompose(opts = { mode: 'new' }) {
     if (init[b.dataset.a].length) b.classList.add('hidden');
   });
   fromSel.onchange = () => {
-    // 换发件账户时，把签名换成新账户的
-    const sig = body.querySelector('.sig');
-    const html = signatureHtml(accountById(fromSel.value));
-    if (sig) sig.outerHTML = html || '';
     dirty = true;
+    // 换到别的账户时，把签名换成新账户的（同一账户换别名不动签名）
+    if (sender().accountId === sigAccount) return;
+    sigAccount = sender().accountId;
+    const sig = body.querySelector('.sig');
+    const html = signatureHtml(accountById(sigAccount));
+    if (sig) sig.outerHTML = html || '';
   };
   content.querySelector('.cf-tools').addEventListener('mousedown', (e) => e.preventDefault());
   content.querySelector('.cf-tools').addEventListener('click', async (e) => {
@@ -428,7 +445,8 @@ export async function openCompose(opts = { mode: 'new' }) {
   });
 
   const collect = () => ({
-    accountId: fromSel.value,
+    accountId: sender().accountId,
+    from: sender().address,
     to: fields.to.value,
     cc: fields.cc.value,
     bcc: fields.bcc.value,

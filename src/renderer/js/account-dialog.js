@@ -39,6 +39,7 @@ export async function openAccountDialog(existing = null) {
       <div class="help-box hidden"><div class="help-title"></div><div class="help-text"></div><button class="btn btn-ghost btn-sm help-link">${icon('external', 14)}打开设置页面</button></div>
       <button class="link-btn auth-switch hidden"></button>
       <div class="form-row"><span class="form-label">发件人名称</span><input class="input" data-f="name" placeholder="收件人看到的名字，可留空"></div>
+      <div class="form-row"><span class="form-label">别名</span><input class="input" data-f="aliases" placeholder="可用来发信的其他地址，多个用逗号隔开" spellcheck="false"></div>
       <div class="form-row"><span class="form-label">在侧栏显示为</span><input class="input" data-f="label" placeholder="默认显示邮箱地址，例如“工作”"></div>
       <details class="adv">
         <summary>${icon('chevron', 14)}服务器设置</summary>
@@ -83,13 +84,16 @@ export async function openAccountDialog(existing = null) {
       if (el.type === 'checkbox') el.checked = !!get(acc, n);
       else el.value = get(acc, n) ?? '';
     }
+    f('aliases').value = (acc.aliases || []).join(', ');
   };
+  const parseAliases = () => [...new Set(f('aliases').value.split(/[\s,，;；]+/).map((s) => s.trim().toLowerCase()).filter(Boolean))];
   const read = () => {
     for (const n of fieldNames) {
       const el = f(n);
       if (!el) continue;
       set(acc, n, el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value.trim());
     }
+    acc.aliases = parseAliases().filter((a) => a !== acc.email.toLowerCase());
   };
 
   const errBox = footer.querySelector('.form-error');
@@ -218,7 +222,7 @@ export async function openAccountDialog(existing = null) {
     const link = helpBox.querySelector('.help-link');
     link.classList.toggle('hidden', !p.helpUrl);
     link.onclick = () => api.app.openExternal(p.helpUrl);
-    const keep = { email: f('email').value, password: f('password').value, name: f('name').value, label: f('label').value };
+    const keep = { email: f('email').value, password: f('password').value, name: f('name').value, label: f('label').value, aliases: f('aliases').value };
     fill();
     Object.entries(keep).forEach(([k, v]) => f(k) && (f(k).value = v));
     renderMode();
@@ -254,6 +258,8 @@ export async function openAccountDialog(existing = null) {
     const needPassword = mode === 'password' && (!isEdit || existing.auth === 'oauth2');
     if (!/^[^\s@]+@[^\s@]+$/.test(acc.email)) return showError('请填写正确的邮箱地址');
     if (needPassword && !password) return showError('请填写密码或授权码');
+    const badAlias = acc.aliases.find((a) => !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(a));
+    if (badAlias) return showError(`别名地址不正确：${badAlias}`);
     if (!acc.imap.host || !acc.smtp.host) {
       content.querySelector('.adv').open = true;
       return showError('请填写收信和发信服务器');

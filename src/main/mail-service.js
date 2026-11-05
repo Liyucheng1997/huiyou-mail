@@ -394,7 +394,7 @@ async function thread(accountId, p, uid) {
     const prev = seen.get(k);
     if (!prev || (m.path === p && m.uid === uid)) seen.set(k, m);
   }
-  const own = new Set(store.accounts.list().map((a) => a.email.toLowerCase()));
+  const own = ownAddresses();
   return [...seen.values()]
     .sort((a, b) => a.date - b.date)
     .map((m) => ({
@@ -720,7 +720,7 @@ function smtpTransport(acc, cred) {
 // 常用联系人：从缓存的发件人 / 收件人里统计，供写信时自动补全
 function contacts() {
   const map = new Map();
-  const own = new Set(store.accounts.list().map((a) => a.email.toLowerCase()));
+  const own = ownAddresses();
   const add = (a, w) => {
     if (!a || !a.address) return;
     const k = a.address.toLowerCase();
@@ -743,6 +743,17 @@ function contacts() {
   return [...map.values()].sort((a, b) => b.score - a.score).slice(0, 1000);
 }
 
+// 自己的所有地址（账户地址 + 别名），小写
+function ownAddresses() {
+  return new Set(store.accounts.list().flatMap((a) => [a.email, ...(a.aliases || [])]).map((x) => String(x).toLowerCase()));
+}
+
+// 这封信用哪个地址发：账户地址，或账户里登记过的别名
+function senderAddress(acc, draft) {
+  const want = String(draft.from || '').trim().toLowerCase();
+  return want && (acc.aliases || []).includes(want) ? want : acc.email;
+}
+
 async function buildMail(acc, draft) {
   const extra = [];
   // 转发 / 编辑草稿时带上原邮件的附件
@@ -754,7 +765,7 @@ async function buildMail(acc, draft) {
     }
   }
   const mail = {
-    from: { name: acc.name || '', address: acc.email },
+    from: { name: acc.name || '', address: senderAddress(acc, draft) },
     to: draft.to,
     cc: draft.cc,
     bcc: draft.bcc,
@@ -787,7 +798,7 @@ async function send(draft) {
   try {
     transport = smtpTransport(acc, await credentials(acc));
     const recipients = [draft.to, draft.cc, draft.bcc].flat().filter(Boolean).map((r) => (typeof r === 'string' ? r : r.address));
-    await transport.sendMail({ envelope: { from: acc.email, to: recipients }, raw });
+    await transport.sendMail({ envelope: { from: senderAddress(acc, draft), to: recipients }, raw });
   } catch (err) {
     if (acc.auth === 'oauth2' && isAuthFailure(err)) oauth.forget(acc.id);
     throw new Error('发送失败：' + friendlyError(err, acc));
