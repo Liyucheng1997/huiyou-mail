@@ -291,6 +291,12 @@ function registerIpc() {
   handle('ai:reset', () => ai.reset());
   handle('ai:approve', ({ requestId, ok }) => ai.answerApproval(requestId, ok));
   handle('ai:resolve', (id) => ai.resolve(id));
+  handle('ai:translate', (req) => {
+    ai.translate(req); // 结果通过 ai:translate 事件流式推送
+    return true;
+  });
+  handle('ai:translate-cancel', (requestId) => ai.cancelTranslate(requestId));
+  handle('ai:translation', (ref) => ai.cachedTranslation(ref));
   handle('blocklist:list', () => store.blocklist.list());
   handle('blocklist:add', ({ senders, reason }) => store.blocklist.add(senders, reason));
   handle('blocklist:remove', (senders) => store.blocklist.remove(senders));

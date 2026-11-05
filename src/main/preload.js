@@ -53,6 +53,10 @@ contextBridge.exposeInMainWorld('api', {
     resolve: call('ai:resolve'),
     onEvent: on('ai:event'),
     onDraft: on('ai:draft'),
+    translate: call('ai:translate'),
+    cancelTranslate: call('ai:translate-cancel'),
+    translation: call('ai:translation'),
+    onTranslate: on('ai:translate'),
   },
   blocklist: { list: call('blocklist:list'), add: call('blocklist:add'), remove: call('blocklist:remove'), onChange: on('ai:blocklist') },
   mail: {

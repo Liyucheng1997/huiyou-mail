@@ -292,6 +292,9 @@ function onKey(e) {
     case 'c':
       openCompose({ mode: 'new' });
       break;
+    case 't':
+      readerAction('translate');
+      break;
     case 'Escape':
       if (state.selected.size) {
         state.selected.clear();

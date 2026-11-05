@@ -208,6 +208,7 @@ async function ai(main, refresh) {
   card.appendChild(
     row('思考深度', '越深越准，也更慢、更耗订阅额度；改了以后从下一次新对话开始生效', segmented([{ label: '快', value: 'low' }, { label: '标准', value: 'medium' }, { label: '深入', value: 'high' }], state.settings.aiEffort || 'medium', (v) => save({ aiEffort: v })))
   );
+  card.appendChild(row('自动翻译外语邮件', '打开英语、意大利语等外语邮件时，自动翻译成中文（会用到订阅额度）；关闭时只在正文上方提示', switchEl(!!state.settings.autoTranslate, (v) => save({ autoTranslate: v }))));
   main.appendChild(card);
 
   main.appendChild(h('<div class="set-section-title">黑名单</div>'));

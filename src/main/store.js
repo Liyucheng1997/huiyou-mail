@@ -35,6 +35,7 @@ const DEFAULT_SETTINGS = {
   markReadOnOpen: true,
   oauthClients: {},
   aiEffort: 'medium', // low | medium | high
+  autoTranslate: false, // 打开外语邮件时自动翻译成中文
   claudePath: '', // 留空自动检测 // { google: { clientId, clientSecret }, microsoft: { clientId } }
 };
 

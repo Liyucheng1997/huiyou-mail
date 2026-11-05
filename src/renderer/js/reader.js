@@ -5,12 +5,14 @@ import { state, api, findMessage, selectedMessages, setFlags, toggleSeen, toggle
 import { toast, menuAt } from './ui.js';
 import { openCompose } from './compose.js';
 import { messageMenu } from './list.js';
+import { attachTranslator } from './translate.js';
 
 let root;
 let loadSeq = 0;
 export const opened = { message: null }; // 当前打开的完整邮件（给回复/转发用）
 const allowImages = new Set(); // 本次运行中允许显示远程图片的邮件
 let readTimer = null;
+let translator = null; // 当前邮件的翻译栏
 
 export function initReader() {
   root = $('#reader');
@@ -24,6 +26,8 @@ function emptyView(text) {
 
 async function render() {
   clearTimeout(readTimer);
+  if (translator) translator.dispose();
+  translator = null;
   const seq = ++loadSeq;
   opened.message = null;
   if (state.selected.size > 1) return renderMulti();
@@ -55,7 +59,13 @@ async function render() {
   body.innerHTML = '';
   body.appendChild(headerEl(summary, msg));
   if (msg.attachments.length) body.appendChild(attachmentsEl(msg));
-  body.appendChild(contentEl(msg));
+  // 正文放在一个固定的容器里：“显示图片”会替换里面的元素，翻译栏切换原文 / 译文时只管这个容器
+  const original = h('<div class="original"></div>');
+  original.appendChild(contentEl(msg));
+  translator = attachTranslator(msg, original);
+  body.appendChild(translator.bar);
+  body.appendChild(translator.view);
+  body.appendChild(original);
 
   if (!summary.seen && state.settings.markReadOnOpen !== false) {
     readTimer = setTimeout(() => {
@@ -107,6 +117,7 @@ function toolbar(m) {
       <button class="icon-btn ${m.flagged ? 'starred' : ''}" data-a="star" title="星标 (S)">${icon('star')}</button>
     </div>
     <span class="flex"></span>
+    <button class="icon-btn" data-a="translate" title="翻译成中文 (T)">${icon('languages')}</button>
     <button class="icon-btn" data-a="more" title="更多">${icon('more')}</button>
   </div>`);
   el.onclick = (e) => {
@@ -128,6 +139,7 @@ function toolbar(m) {
       return menuAt(b, folders.length ? folders.map((x) => ({ label: x.name, icon: 'folder', onClick: () => move([m], x.path) })) : [{ label: '没有其他文件夹', disabled: true }]);
     }
     if (a === 'more') return menuAt(b, messageMenu([m]));
+    if (a === 'translate') return translator && translator.run();
   };
   return el;
 }
@@ -264,6 +276,7 @@ function buildDoc(msg, allowRemote) {
 
 // 给快捷键用
 export function readerAction(a) {
+  if (a === 'translate') return translator && translator.run();
   const m = state.current && findMessage(state.current);
   if (!m) return;
   if (['reply', 'replyAll', 'forward'].includes(a)) openCompose({ mode: a, source: m });
