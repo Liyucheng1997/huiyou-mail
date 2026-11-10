@@ -1,5 +1,5 @@
 // 汇邮 主进程：窗口、托盘、IPC、定时同步、新邮件通知。
-const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, Notification, nativeImage, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, Notification, nativeImage, nativeTheme, powerMonitor } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -108,6 +108,8 @@ function createWindow() {
     }
   });
   win.on('closed', () => (win = null));
+  // 回到窗口多半是要看信：提前把读信连接连好
+  win.on('focus', () => mail.warmReaders());
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
 }
 
@@ -167,6 +169,7 @@ async function syncAccount(id) {
 
 async function syncAll() {
   await Promise.all(store.accounts.list().map((a) => syncAccount(a.id)));
+  if (win && !win.isDestroyed() && win.isVisible() && !win.isMinimized()) mail.warmReaders();
 }
 
 function scheduleSync() {
@@ -400,6 +403,11 @@ app.whenReady().then(() => {
   scheduleSync();
   // 启动后先同步一次（界面会显示缓存，再刷新）
   setTimeout(syncAll, 600);
+  // 休眠醒来：旧连接已经失效，换新的再收一次，不然要干等到超时
+  powerMonitor.on('resume', () => {
+    mail.dropConnections();
+    setTimeout(syncAll, 3000);
+  });
 });
 
 app.on('before-quit', () => {

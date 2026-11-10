@@ -9,21 +9,36 @@ const MailComposer = require('nodemailer/lib/mail-composer');
 const { simpleParser } = require('mailparser');
 const store = require('./store');
 const oauth = require('./oauth');
-const { makeSnippet, findTextPart, hasAttachments, guessSpecial, sortFolders, SPECIAL_NAMES } = require('./mail-text');
+const { makeSnippet, findTextPart, hasAttachments, guessSpecial, sortFolders, SPECIAL_NAMES, litePlan, buildLite, decodePart } = require('./mail-text');
 
 const INITIAL_COUNT = 150; // 第一次同步一个文件夹时拉取的邮件数
 const PAGE_COUNT = 100; // “加载更早的邮件”每次的数量
 const KEEP_MAX = 2000; // 每个文件夹本地最多缓存的摘要数
+const LITE_MIN = 512 * 1024; // 比这大的邮件先只下正文，附件用到时再下
+const PREFETCH_MAX = 20; // 每次收信后，后台提前下好最新几封的正文
+const READER_IDLE = 15 * 60 * 1000; // 读信连接闲置这么久就断开
 
 let emit = () => {};
-const clients = new Map(); // accountId -> { client, connecting, folders }
+// 每个账户两条连接：主连接收信、改标记、等推送；读信连接只管下载正文和附件，这样点开邮件不用排在收信后面
+const clients = new Map(); // 连接名 -> { client, connecting }
+const READ = 'read';
+const connKey = (accountId, role) => (role === READ ? accountId + '\n' + READ : accountId);
 
 // ---------- 缓存 ----------
 const cacheRoot = () => path.join(store.dataDir(), 'cache');
 const hash = (s) => crypto.createHash('sha1').update(s).digest('hex').slice(0, 16);
 const accDir = (id) => path.join(cacheRoot(), id);
 const folderFile = (id, p) => path.join(accDir(id), 'msgs', hash(p) + '.json');
-const bodyFile = (id, p, uv, uid) => path.join(accDir(id), 'bodies', `${hash(p)}_${uv}_${uid}.eml`);
+// 一封邮件在本机的几种缓存：完整原文、只有正文的“精简版”、单独下载的附件
+function bodyFiles(id, p, uid) {
+  const base = path.join(accDir(id), 'bodies', `${hash(p)}_${loadFolder(id, p).uidValidity || '0'}_${uid}`);
+  return { full: base + '.eml', lite: base + '.lite.eml', part: (n) => `${base}.p${String(n).replace(/[^\d.]/g, '')}.bin` };
+}
+function writeFile(file, buf) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + '.tmp', buf);
+  fs.renameSync(file + '.tmp', file);
+}
 
 function readJson(file, fallback) {
   try {
@@ -68,7 +83,7 @@ function authOf(acc, cred) {
   return cred.accessToken ? { user, accessToken: cred.accessToken } : { user, pass: cred.pass };
 }
 
-function imapOptions(acc, cred) {
+function imapOptions(acc, cred, role) {
   return {
     host: acc.imap.host,
     port: Number(acc.imap.port) || 993,
@@ -79,7 +94,8 @@ function imapOptions(acc, cred) {
     tls: { rejectUnauthorized: !acc.allowInsecure },
     connectionTimeout: 30000,
     greetingTimeout: 20000,
-    socketTimeout: 5 * 60 * 1000,
+    // 连接悄悄断掉（休眠、换网络）时，2 分钟没回音就放弃重连，不让一次收信卡上 5 分钟
+    socketTimeout: 2 * 60 * 1000,
   };
 }
 
@@ -114,23 +130,26 @@ function status(accountId, s) {
   emit('mail:status', lastStatus[accountId]);
 }
 
-async function getClient(accountId) {
-  let entry = clients.get(accountId);
+async function getClient(accountId, role) {
+  const key = connKey(accountId, role);
+  let entry = clients.get(key);
   if (entry && entry.client && entry.client.usable) return entry.client;
   if (entry && entry.connecting) return entry.connecting;
   const acc = store.accounts.get(accountId);
   if (!acc) throw new Error('账户不存在');
   entry = entry || {};
-  clients.set(accountId, entry);
+  clients.set(key, entry);
   entry.connecting = (async () => {
-    const client = new ImapFlow(imapOptions(acc, await credentials(acc)));
+    const client = new ImapFlow(imapOptions(acc, await credentials(acc), role));
     client.on('error', () => {}); // 错误在调用处处理；这里防止未捕获异常
     client.on('close', () => {
       if (entry.client === client) entry.client = null;
     });
-    client.on('exists', (info) => {
-      if (info && info.count > info.prevCount) scheduleSync(accountId, info.path);
-    });
+    if (role !== READ) {
+      client.on('exists', (info) => {
+        if (info && info.count > info.prevCount) scheduleSync(accountId, info.path);
+      });
+    }
     try {
       await client.connect();
     } catch (err) {
@@ -148,9 +167,9 @@ async function getClient(accountId) {
   }
 }
 
-async function disconnect(accountId) {
-  const entry = clients.get(accountId);
-  clients.delete(accountId);
+async function closeConn(key) {
+  const entry = clients.get(key);
+  clients.delete(key);
   if (entry && entry.client) {
     try {
       await entry.client.logout();
@@ -160,30 +179,124 @@ async function disconnect(accountId) {
   }
 }
 
-async function disconnectAll() {
-  await Promise.all([...clients.keys()].map(disconnect));
+async function disconnect(accountId) {
+  clearTimeout(readerTimers.get(accountId));
+  await Promise.all([closeConn(connKey(accountId)), closeConn(connKey(accountId, READ))]);
 }
 
-// 对某个文件夹加锁执行操作；连接断了会重连一次
-async function withMailbox(accountId, p, fn, retry = true) {
+async function disconnectAll() {
+  await Promise.all([...clients.keys()].map(closeConn));
+}
+
+// 电脑从休眠醒来：旧连接多半已经断了但自己不知道，直接扔掉，下次用时重连
+function dropConnections() {
+  for (const entry of clients.values()) {
+    const c = entry.client;
+    entry.client = null;
+    if (c) {
+      try {
+        c.close();
+      } catch {}
+    }
+  }
+}
+
+// 拿到连接执行操作；连接断了会重连一次
+async function withClient(accountId, fn, { role, retry = true } = {}) {
   let client;
   try {
-    client = await getClient(accountId);
-    const lock = await client.getMailboxLock(p);
-    try {
-      return await fn(client);
-    } finally {
-      lock.release();
-    }
+    client = await getClient(accountId, role);
+    return await fn(client);
   } catch (err) {
-    if (err && (err.reauth || err.noClient || err.network)) throw err; // 重连也没用
+    if (err && (err.reauth || err.noClient || err.network || err.gone)) throw err; // 重连也没用
     const dropped = !client || !client.usable || /Connection not available|closed|ECONNRESET|EPIPE|socket/i.test(String(err && err.message));
     if (retry && dropped) {
-      const entry = clients.get(accountId);
-      if (entry) entry.client = null;
-      return withMailbox(accountId, p, fn, false);
+      const entry = clients.get(connKey(accountId, role));
+      if (entry && (!client || entry.client === client)) entry.client = null;
+      return withClient(accountId, fn, { role, retry: false });
     }
     throw err;
+  }
+}
+
+// 对某个文件夹加锁执行操作
+function withMailbox(accountId, p, fn, opts) {
+  return withClient(
+    accountId,
+    async (client) => {
+      const lock = await client.getMailboxLock(p);
+      try {
+        return await fn(client);
+      } finally {
+        lock.release();
+      }
+    },
+    opts
+  );
+}
+
+// ---------- 读信连接上的任务队列 ----------
+// 一次只跑一个。用户点开的（priority 0）排在后台预取（priority 1）前面，而且后点的先做
+const readQueues = new Map(); // accountId -> { jobs, running }
+const readerTimers = new Map();
+
+function readJob(accountId, p, fn, priority = 0) {
+  let q = readQueues.get(accountId);
+  if (!q) readQueues.set(accountId, (q = { jobs: [], running: false }));
+  const job = { p, fn, priority };
+  const promise = new Promise((resolve, reject) => Object.assign(job, { resolve, reject }));
+  q.jobs.push(job);
+  pumpReads(accountId, q);
+  return { promise, job };
+}
+
+// 用户等不及点开了一封正在排队预取的邮件：提到最前面
+function hurry(accountId, job) {
+  const q = readQueues.get(accountId);
+  job.priority = 0;
+  const i = q ? q.jobs.indexOf(job) : -1;
+  if (i >= 0) q.jobs.push(q.jobs.splice(i, 1)[0]);
+}
+
+async function pumpReads(accountId, q) {
+  if (q.running) return;
+  q.running = true;
+  clearTimeout(readerTimers.get(accountId));
+  while (q.jobs.length) {
+    let i = q.jobs.findLastIndex((j) => j.priority === 0);
+    if (i < 0) i = 0;
+    const job = q.jobs.splice(i, 1)[0];
+    try {
+      job.resolve(await withMailbox(accountId, job.p, job.fn, { role: READ }));
+    } catch (err) {
+      job.reject(err);
+    }
+  }
+  q.running = false;
+  touchReader(accountId);
+}
+
+// 读信连接很久没用就断开
+function touchReader(accountId) {
+  clearTimeout(readerTimers.get(accountId));
+  readerTimers.set(
+    accountId,
+    setTimeout(() => {
+      const q = readQueues.get(accountId);
+      if (!q || !q.running) closeConn(connKey(accountId, READ)).catch(() => {});
+    }, READER_IDLE)
+  );
+}
+
+// 用户回到窗口时提前把读信连接连好（登录要一两秒），这样点开第一封也不用等。
+// 只给主连接正常的账户连，登录有问题的不在这里反复试
+function warmReaders() {
+  for (const acc of store.accounts.list()) {
+    const main = clients.get(connKey(acc.id));
+    if (!main || !main.client || !main.client.usable) continue;
+    const reader = clients.get(connKey(acc.id, READ));
+    if (reader && ((reader.client && reader.client.usable) || reader.connecting)) touchReader(acc.id);
+    else readJob(acc.id, inboxPath(acc.id), async () => {}, 1).promise.catch(() => {});
   }
 }
 
@@ -251,11 +364,15 @@ function toSummary(accountId, p, msg) {
 
 const SUMMARY_QUERY = { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true };
 
-async function fetchSummaries(client, accountId, p, range, opts) {
+// keep：只留下符合条件的（“N:*”即使没有新邮件，服务器也会把最后一封发回来）
+async function fetchSummaries(client, accountId, p, range, opts, keep = null) {
   const out = [];
   const query = { ...SUMMARY_QUERY };
   if (client.capabilities && client.capabilities.has('X-GM-EXT-1')) query.threadId = true;
-  for await (const msg of client.fetch(range, query, opts)) out.push(toSummary(accountId, p, msg));
+  for await (const msg of client.fetch(range, query, opts)) {
+    const m = toSummary(accountId, p, msg);
+    if (!keep || keep(m)) out.push(m);
+  }
   await fillSnippets(client, out);
   for (const m of out) delete m._text;
   return out;
@@ -379,7 +496,8 @@ async function thread(accountId, p, uid) {
     try {
       list = await withMailbox(accountId, all.path, async (client) => {
         const uids = ((await client.search({ threadId: cur.threadId }, { uid: true })) || []).sort((a, b) => a - b).slice(-50);
-        return uids.length ? fetchSummaries(client, accountId, all.path, uids.join(','), { uid: true }) : [];
+        // 对话里只有这一封（大多数邮件都是）：不用再拉摘要
+        return uids.length > 1 ? fetchSummaries(client, accountId, all.path, uids.join(','), { uid: true }) : [];
       });
       idleInbox(accountId);
     } catch {
@@ -413,18 +531,49 @@ function reportError(accountId, err, p = null) {
   return message;
 }
 
+// 文件夹的“指纹”：不用打开文件夹，一条 STATUS 就能问到。
+// 支持 CONDSTORE 的服务器（Gmail 等）上，邮件数、下一个编号、修改序号都没变 = 什么都没变
+async function folderSig(accountId, p) {
+  try {
+    const st = await withClient(accountId, (client) => client.status(p, { messages: true, uidNext: true, uidValidity: true, unseen: true, highestModseq: true }));
+    if (!st || st.highestModseq == null || st.uidNext == null || st.messages == null) return null;
+    return { uidValidity: String(st.uidValidity), uidNext: Number(st.uidNext), exists: Number(st.messages), modseq: String(st.highestModseq), unseen: Number(st.unseen) || 0 };
+  } catch (err) {
+    if (err && (err.reauth || isAuthFailure(err))) throw err;
+    return null; // 服务器不支持就走完整同步
+  }
+}
+
+const sameSig = (data, sig) =>
+  !!data.sig && data.uidValidity === sig.uidValidity && data.sig.modseq === sig.modseq && data.sig.uidNext === sig.uidNext && data.sig.exists === sig.exists;
+
 function syncFolder(accountId, p) {
   const key = accountId + '\n' + p;
   if (syncing.has(key)) return syncing.get(key);
   const run = (async () => {
     status(accountId, { state: 'syncing', path: p });
     try {
-      const result = await withMailbox(accountId, p, (client) => doSync(client, accountId, p));
-      await applyBlocklist(accountId, p, result);
-      delete result.fetched;
-      if (p !== inboxPath(accountId)) idleInbox(accountId);
+      const sig = await folderSig(accountId, p);
+      const cached = loadFolder(accountId, p);
+      let result;
+      if (sig && sameSig(cached, sig)) {
+        // 和上次同步完全一样：不用打开文件夹，也不用通知界面
+        if (cached.unread !== sig.unseen) {
+          cached.unread = sig.unseen;
+          saveFolder(accountId, p, cached);
+          updateFolderCounts(accountId, p, cached);
+          emit('mail:changed', { accountId, path: p, newMessages: [] });
+        }
+        result = { ...publicFolder(cached), newMessages: [] };
+      } else {
+        result = await withMailbox(accountId, p, (client) => doSync(client, accountId, p, sig));
+        await applyBlocklist(accountId, p, result);
+        if (p === inboxPath(accountId)) prefetch(accountId, p, result.newMessages);
+        delete result.fetched;
+        if (p !== inboxPath(accountId)) idleInbox(accountId);
+        emit('mail:changed', { accountId, path: p, newMessages: result.newMessages });
+      }
       status(accountId, { state: 'idle', path: p, lastSync: Date.now() });
-      emit('mail:changed', { accountId, path: p, newMessages: result.newMessages });
       return result;
     } catch (err) {
       throw new Error(reportError(accountId, err, p));
@@ -435,16 +584,22 @@ function syncFolder(accountId, p) {
   return run;
 }
 
-async function doSync(client, accountId, p) {
+const withFlags = (m, f) => ({ ...m, seen: f.has('\\Seen'), flagged: f.has('\\Flagged'), answered: f.has('\\Answered'), draft: f.has('\\Draft') });
+
+// sig：同步前问到的指纹（服务器不支持时为 null）
+async function doSync(client, accountId, p, sig) {
   const mb = client.mailbox;
   const uidValidity = String(mb.uidValidity);
   let data = loadFolder(accountId, p);
   const firstSync = data.uidValidity === null;
   if (data.uidValidity !== uidValidity) data = { uidValidity, messages: [], total: 0, unread: 0, complete: false };
+  if (sig && sig.uidValidity !== uidValidity) sig = null;
+  const nextSig = sig ? { modseq: sig.modseq, uidNext: sig.uidNext, exists: sig.exists } : null;
 
   if (!mb.exists) {
-    data = { ...data, messages: [], total: 0, unread: 0, complete: true };
+    data = { ...data, messages: [], total: 0, unread: 0, complete: true, sig: nextSig };
     saveFolder(accountId, p, data);
+    updateFolderCounts(accountId, p, data);
     return { ...publicFolder(data), newMessages: [] };
   }
 
@@ -455,27 +610,43 @@ async function doSync(client, accountId, p) {
     const start = Math.max(1, mb.exists - INITIAL_COUNT + 1);
     fresh = await fetchSummaries(client, accountId, p, `${start}:*`, {});
     data.complete = start === 1;
+  } else if (mb.uidNext && Number(mb.uidNext) <= highest + 1) {
+    fresh = []; // 下一个编号还没动过：没有新邮件
   } else {
-    fresh = (await fetchSummaries(client, accountId, p, `${highest + 1}:*`, { uid: true })).filter((m) => m.uid > highest);
+    fresh = await fetchSummaries(client, accountId, p, `${highest + 1}:*`, { uid: true }, (m) => m.uid > highest);
   }
 
   // 刷新已缓存邮件的标记，并去掉服务器上已经不存在的
   let kept = known;
   if (known.length) {
-    const lowest = known[known.length - 1].uid;
-    const flags = new Map();
-    for await (const m of client.fetch(`${lowest}:${highest}`, { uid: true, flags: true }, { uid: true })) flags.set(m.uid, m.flags || new Set());
-    kept = [];
-    for (const m of known) {
-      const f = flags.get(m.uid);
-      if (!f) continue;
-      kept.push({ ...m, seen: f.has('\\Seen'), flagged: f.has('\\Flagged'), answered: f.has('\\Answered'), draft: f.has('\\Draft') });
+    const range = `${known[known.length - 1].uid}:${highest}`;
+    const since = sig && data.sig && data.sig.modseq && client.enabled && client.enabled.has('CONDSTORE') ? data.sig.modseq : null;
+    if (since) {
+      // 只问上次同步之后改过标记的邮件，不用把几百上千封的标记全拉一遍
+      const changed = new Map();
+      for await (const m of client.fetch(range, { uid: true, flags: true }, { uid: true, changedSince: BigInt(since) })) changed.set(m.uid, m.flags || new Set());
+      // 邮件总数对得上就说明没有被删的；对不上再问一次哪些还在
+      let alive = null;
+      if ((data.total || 0) + fresh.length !== mb.exists) alive = new Set((await client.search({ uid: range }, { uid: true })) || []);
+      kept = [];
+      for (const m of known) {
+        if (alive && !alive.has(m.uid)) continue;
+        kept.push(changed.has(m.uid) ? withFlags(m, changed.get(m.uid)) : m);
+      }
+    } else {
+      const flags = new Map();
+      for await (const m of client.fetch(range, { uid: true, flags: true }, { uid: true })) flags.set(m.uid, m.flags || new Set());
+      kept = [];
+      for (const m of known) {
+        const f = flags.get(m.uid);
+        if (f) kept.push(withFlags(m, f));
+      }
     }
   }
 
-  const unseen = await client.search({ seen: false }, { uid: true });
+  const unread = sig ? sig.unseen : ((await client.search({ seen: false }, { uid: true })) || []).length;
   const messages = [...fresh, ...kept].sort((a, b) => b.uid - a.uid).slice(0, KEEP_MAX);
-  data = { ...data, uidValidity, messages, total: mb.exists, unread: (unseen || []).length };
+  data = { ...data, uidValidity, messages, total: mb.exists, unread, sig: nextSig };
   saveFolder(accountId, p, data);
   updateFolderCounts(accountId, p, data);
 
@@ -580,39 +751,138 @@ function removeCached(accountId, p, uids) {
 }
 
 // ---------- 读信 ----------
-async function rawMessage(accountId, p, uid) {
-  const data = loadFolder(accountId, p);
-  const file = bodyFile(accountId, p, data.uidValidity || '0', uid);
-  if (fs.existsSync(file)) return fs.readFileSync(file);
-  const buf = await withMailbox(accountId, p, async (client) => {
-    const res = await client.download(String(uid), undefined, { uid: true });
-    if (!res || !res.content) throw new Error('邮件已不存在，可能已在其他设备上删除或移动');
-    const chunks = [];
-    for await (const c of res.content) chunks.push(c);
-    return Buffer.concat(chunks);
-  });
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, buf);
-  return buf;
+function gone() {
+  const err = new Error('邮件已不存在，可能已在其他设备上删除或移动');
+  err.gone = true;
+  return err;
+}
+
+// 从服务器取一封邮件。每样东西都是一条命令整块取回——按小块分段取在 Gmail 上非常慢，还容易被限速。
+// 大邮件只取“精简版”：正文和内嵌小图是真的，附件只留一个空壳（记着它在邮件里的位置），用到时再单独下
+async function downloadMessage(client, files, uid, sizeHint) {
+  const one = (query) => client.fetchOne(String(uid), query, { uid: true });
+  if (!(sizeHint > 0 && sizeHint <= LITE_MIN)) {
+    const info = await one({ bodyStructure: true, size: true });
+    if (!info) throw gone();
+    const plan = info.size > LITE_MIN ? litePlan(info.bodyStructure) : null;
+    if (plan) {
+      const res = await one({ headers: true, bodyParts: plan.keys });
+      if (!res) throw gone();
+      const raw = buildLite(plan, res);
+      if (raw) {
+        writeFile(files.lite, raw);
+        return raw;
+      }
+    }
+  }
+  const res = await one({ source: true });
+  if (!res || !res.source) throw gone();
+  writeFile(files.full, res.source);
+  return res.source;
+}
+
+// 邮件原文（完整的或精简版）：本机有就直接用，没有就下载；同一封同时只下一次
+const downloading = new Map();
+function rawMessage(accountId, p, uid, priority = 0) {
+  const files = bodyFiles(accountId, p, uid);
+  if (fs.existsSync(files.full)) return fs.promises.readFile(files.full);
+  if (fs.existsSync(files.lite)) return fs.promises.readFile(files.lite);
+  const key = `${accountId}\n${p}\n${uid}`;
+  const pending = downloading.get(key);
+  if (pending) {
+    if (priority === 0 && pending.job.priority !== 0) hurry(accountId, pending.job);
+    return pending.promise;
+  }
+  const cached = loadFolder(accountId, p).messages.find((m) => m.uid === uid);
+  const task = readJob(accountId, p, (client) => downloadMessage(client, files, uid, cached ? cached.size : 0), priority);
+  downloading.set(key, task);
+  task.promise.finally(() => downloading.delete(key)).catch(() => {});
+  return task.promise;
+}
+
+// 收到新邮件后，后台先把正文下好，点开时就不用等
+function prefetch(accountId, p, list) {
+  const newest = [...(list || [])].sort((a, b) => b.uid - a.uid).slice(0, PREFETCH_MAX);
+  for (const m of newest) rawMessage(accountId, p, m.uid, 1).catch(() => {});
+}
+
+// 精简版里的空壳附件：返回它在原邮件里的位置（如 "2"、"2.1"），不是空壳返回 ''
+const stubPart = (a) => String((a.headers && a.headers.get('x-huiyou-part')) || '').trim();
+const stubSize = (a) => Number(a.headers && a.headers.get('x-huiyou-size')) || 0;
+
+// 单独下载空壳附件的真实内容（解码后），一条命令取回所有要的；下过的留在本机。
+// stubs：解析精简版得到的附件对象。返回 Map：位置 -> 内容
+async function partContents(accountId, p, uid, stubs) {
+  const files = bodyFiles(accountId, p, uid);
+  const out = new Map();
+  const missing = [];
+  for (const a of stubs) {
+    const part = stubPart(a);
+    if (fs.existsSync(files.part(part))) out.set(part, await fs.promises.readFile(files.part(part)));
+    else missing.push(a);
+  }
+  if (missing.length) {
+    const got = await readJob(accountId, p, async (client) => {
+      const res = await client.fetchOne(String(uid), { bodyParts: missing.map(stubPart) }, { uid: true });
+      if (!res || !res.bodyParts) throw gone();
+      return new Map([...res.bodyParts].map(([k, v]) => [String(k).toLowerCase(), v]));
+    }).promise;
+    for (const a of missing) {
+      const part = stubPart(a);
+      const body = got.get(part.toLowerCase());
+      if (!body) throw gone();
+      const buf = decodePart(body, a.headers.get('content-transfer-encoding'));
+      writeFile(files.part(part), buf);
+      out.set(part, buf);
+    }
+  }
+  return out;
+}
+
+// 取出几个附件的内容（index 是它在邮件附件列表里的序号）
+async function loadAttachments(accountId, p, uid, indexes) {
+  const mail = await simpleParser(await rawMessage(accountId, p, uid), { keepCidLinks: true });
+  const picked = indexes.map((index) => ({ index, a: mail.attachments[index] })).filter((x) => x.a);
+  const stubs = picked.map((x) => x.a).filter(stubPart);
+  const got = stubs.length ? await partContents(accountId, p, uid, stubs) : new Map();
+  return picked.map(({ index, a }) => ({
+    index,
+    filename: a.filename || `附件${index + 1}`,
+    content: stubPart(a) ? got.get(stubPart(a)) : a.content,
+    contentType: a.contentType,
+  }));
 }
 
 const fmtAddrs = (v) => (v ? (Array.isArray(v) ? v : [v]).flatMap((x) => x.value || []).map((a) => ({ name: a.name || '', address: a.address || '' })) : []);
+const INLINE_MAX = 8 * 1024 * 1024; // 比这大的内嵌内容不塞进正文，只当附件列出
+const cidOf = (a) => (a.contentId ? a.contentId.replace(/^<|>$/g, '') : '');
 
 async function readMessage(accountId, p, uid) {
   const raw = await rawMessage(accountId, p, uid);
-  const mail = await simpleParser(raw, { skipTextToHtml: false });
+  // cid 链接留着自己换：精简版里图片可能只是空壳，得先把真内容补回来
+  const mail = await simpleParser(raw, { skipTextToHtml: false, keepCidLinks: true });
   let html = mail.html || mail.textAsHtml || '';
+  const list = mail.attachments || [];
+  const CID_RE = /\bcid:([^'"\s]{1,256})/g;
+  const citedIds = new Set([...html.matchAll(CID_RE)].map((m) => m[1]));
+  const cited = (a) => citedIds.has(cidOf(a));
+  // 精简版里留了空壳、但正文其实引用了的内嵌内容：现在补下回来
+  const need = list.filter((a) => stubPart(a) && cited(a) && stubSize(a) < INLINE_MAX);
+  const got = need.length ? await partContents(accountId, p, uid, need) : new Map();
   const attachments = [];
-  (mail.attachments || []).forEach((a, index) => {
-    const cid = a.contentId ? a.contentId.replace(/^<|>$/g, '') : '';
-    // 正文里引用的内嵌图片换成 data URI，不当成附件列出
-    if (cid && html.includes('cid:' + cid) && a.content.length < 8 * 1024 * 1024) {
-      const uri = `data:${a.contentType};base64,${a.content.toString('base64')}`;
-      html = html.split('cid:' + cid).join(uri);
-      if (a.contentDisposition !== 'attachment') return;
+  const uris = new Map();
+  list.forEach((a, index) => {
+    const part = stubPart(a);
+    const content = part ? got.get(part) : a.content;
+    // 正文里引用的内嵌内容换成 data URI。图片照旧也列在附件里（转发时能带上），其他内嵌内容不列
+    if (content && cited(a) && content.length < INLINE_MAX) {
+      if (!uris.has(cidOf(a))) uris.set(cidOf(a), `data:${a.contentType};base64,${content.toString('base64')}`);
+      if (!/^image\/[\w]+$/i.test(a.contentType) && a.contentDisposition !== 'attachment') return;
     }
-    attachments.push({ index, filename: a.filename || `附件${index + 1}`, contentType: a.contentType, size: a.size || a.content.length });
+    const size = part ? (content ? content.length : stubSize(a)) : a.size || a.content.length;
+    attachments.push({ index, filename: a.filename || `附件${index + 1}`, contentType: a.contentType, size });
   });
+  if (uris.size) html = html.replace(CID_RE, (m, cid) => uris.get(cid) || m);
   return {
     accountId,
     path: p,
@@ -635,10 +905,9 @@ async function readMessage(accountId, p, uid) {
 }
 
 async function attachmentContent(accountId, p, uid, index) {
-  const mail = await simpleParser(await rawMessage(accountId, p, uid));
-  const a = mail.attachments[index];
+  const [a] = await loadAttachments(accountId, p, uid, [index]);
   if (!a) throw new Error('附件不存在');
-  return { filename: a.filename || `附件${index + 1}`, content: a.content, contentType: a.contentType };
+  return a;
 }
 
 // ---------- 操作 ----------
@@ -758,11 +1027,8 @@ async function buildMail(acc, draft) {
   const extra = [];
   // 转发 / 编辑草稿时带上原邮件的附件
   if (draft.carry && draft.carry.indexes && draft.carry.indexes.length) {
-    const mail = await simpleParser(await rawMessage(draft.carry.accountId, draft.carry.path, draft.carry.uid));
-    for (const i of draft.carry.indexes) {
-      const a = mail.attachments[i];
-      if (a) extra.push({ filename: a.filename || `附件${i + 1}`, content: a.content, contentType: a.contentType });
-    }
+    const list = await loadAttachments(draft.carry.accountId, draft.carry.path, draft.carry.uid, draft.carry.indexes);
+    for (const a of list) extra.push({ filename: a.filename, content: a.content, contentType: a.contentType });
   }
   const mail = {
     from: { name: acc.name || '', address: senderAddress(acc, draft) },
@@ -920,6 +1186,8 @@ module.exports = {
   testAccount,
   disconnect,
   disconnectAll,
+  dropConnections,
+  warmReaders,
   removeAccountCache,
   cacheSize,
   clearBodyCache,
